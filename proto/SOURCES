@@ -1,0 +1,16 @@
+# Vendored protobuf schema inputs
+#
+# Do not edit these inputs. Refresh them only by updating the immutable source
+# revision and SHA-256 below, then regenerate with ./proto/generate.sh.
+
+com/google/transit/realtime/gtfs-realtime.proto
+  source: https://github.com/MobilityData/gtfs-realtime-bindings/blob/339b75416196f6988a3cd5599ba33f7762807a48/gtfs-realtime.proto
+  revision: 339b75416196f6988a3cd5599ba33f7762807a48
+  sha256: ea4bf90005bd1f8484733b8d607cb7d9c630957270a7d04c337434567933e548
+  license: Apache-2.0 (preserved in source file)
+
+nyct-subway.proto
+  source: https://github.com/OneBusAway/onebusaway-gtfs-realtime-api/blob/b134b5428a2f63b511b80f2a6c534e0e8028ad54/src/main/proto/com/google/transit/realtime/gtfs-realtime-NYCT.proto
+  revision: b134b5428a2f63b511b80f2a6c534e0e8028ad54
+  sha256: f1ab02956343fbaf57cb49e8cb2cb9ebeccf6c74a26632dcac5c8b2f32455b08
+  copyright: Metropolitan Transportation Authority (preserved in source file)
