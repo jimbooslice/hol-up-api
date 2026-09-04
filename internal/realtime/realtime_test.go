@@ -101,3 +101,26 @@ func TestEmptyStoreIsUnavailable(t *testing.T) {
 		t.Fatalf("Load() = %#v, want unavailable empty snapshot", loaded)
 	}
 }
+
+func TestCombineRequiresAllSourcesAndUsesOldestTimestamp(t *testing.T) {
+	older := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	newer := older.Add(20 * time.Second)
+	if _, ok := Combine(Snapshot{SourceTimestamp: older}, Snapshot{}); ok {
+		t.Fatal("Combine() published before every source loaded")
+	}
+
+	combined, ok := Combine(
+		Snapshot{SourceTimestamp: newer, Trains: []Train{{RouteID: "N", TripID: "trip-n", SourceTimestamp: newer}}},
+		Snapshot{SourceTimestamp: older, Trains: []Train{{RouteID: "A", TripID: "trip-z", SourceTimestamp: older}, {RouteID: "A", TripID: "trip-a", SourceTimestamp: older}}},
+	)
+	if !ok || !combined.SourceTimestamp.Equal(older) {
+		t.Fatalf("Combine() = %#v/%v, want oldest timestamp", combined, ok)
+	}
+	got := []string{combined.Trains[0].TripID, combined.Trains[1].TripID, combined.Trains[2].TripID}
+	want := []string{"trip-a", "trip-z", "trip-n"}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("combined train order = %v, want %v", got, want)
+		}
+	}
+}

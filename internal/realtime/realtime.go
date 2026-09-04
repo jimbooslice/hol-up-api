@@ -82,6 +82,25 @@ func NewStore() *Store {
 	return &Store{}
 }
 
+// Combine returns one snapshot only when every source has loaded. The oldest
+// source timestamp makes aggregate freshness reflect the least-fresh source.
+func Combine(snapshots ...Snapshot) (Snapshot, bool) {
+	if len(snapshots) == 0 {
+		return Snapshot{}, false
+	}
+	combined := Snapshot{SourceTimestamp: snapshots[0].SourceTimestamp}
+	for _, snapshot := range snapshots {
+		if snapshot.SourceTimestamp.IsZero() {
+			return Snapshot{}, false
+		}
+		if snapshot.SourceTimestamp.Before(combined.SourceTimestamp) {
+			combined.SourceTimestamp = snapshot.SourceTimestamp
+		}
+		combined.Trains = append(combined.Trains, snapshot.Trains...)
+	}
+	return cloneSnapshot(combined), true
+}
+
 // Replace publishes next only when it is structurally usable.
 func (s *Store) Replace(next Snapshot) error {
 	if next.SourceTimestamp.IsZero() {

@@ -1,9 +1,9 @@
 # Hol Up transit API
 
-This repository currently implements the first A-line realtime API slice from
-[`ARCHITECTURE_PLAN.md`](ARCHITECTURE_PLAN.md): it polls MTA's anonymous ACE
-GTFS-Realtime protobuf feed, decodes the standard and NYCT schemas, and
-atomically serves the latest valid A-line snapshot.
+This repository polls MTA's anonymous ACE and N/Q/R/W GTFS-Realtime protobuf
+feeds, decodes the standard and NYCT schemas, and atomically serves their
+combined A/C/E and N/Q/R/W service plus any shuttle routes carried by those
+grouped feeds.
 
 ## Run
 
@@ -14,12 +14,12 @@ curl http://localhost:8080/readyz
 curl 'http://localhost:8080/api/v1/trains?route_id=A'
 ```
 
-`ADDR` overrides the listen address and `MTA_GTFS_RT_URL` overrides the feed
-URL. The default source is MTA's anonymous ACE endpoint. A failed refresh never
-replaces the last known good snapshot.
+`ADDR` overrides the listen address. `MTA_GTFS_RT_URL` overrides the ACE feed
+URL and `MTA_GTFS_RT_NQRW_URL` overrides the N/Q/R/W feed URL. A failed refresh
+never replaces that feed's last known good snapshot.
 
 Available endpoints are `GET /healthz`, `/readyz`, `/metrics`,
-`/api/v1/routes`, and `/api/v1/trains?route_id=A`.
+`/api/v1/routes`, and `/api/v1/trains?route_id=A` (or another returned route).
 
 ## Verify
 

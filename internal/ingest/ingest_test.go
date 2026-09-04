@@ -101,6 +101,33 @@ func TestDecodePairsPartialVehicleDescriptorAndHonorsStoppedStatus(t *testing.T)
 	}
 }
 
+func TestDecodeWithoutRouteFilterRetainsEveryRoute(t *testing.T) {
+	sourceTime := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
+	feed := &gtfs.FeedMessage{
+		Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("1.0"), Timestamp: proto.Uint64(uint64(sourceTime.Unix()))},
+		Entity: []*gtfs.FeedEntity{
+			tripUpdateEntity("a", "trip-a", "A", "A01N"),
+			tripUpdateEntity("c", "trip-c", "C", "A02S"),
+		},
+	}
+
+	all, err := Decode(mustMarshal(t, feed), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all.Trains) != 2 || all.Trains[0].RouteID != "A" || all.Trains[1].RouteID != "C" {
+		t.Fatalf("unfiltered trains = %#v, want A and C", all.Trains)
+	}
+
+	filtered, err := Decode(mustMarshal(t, feed), "C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filtered.Trains) != 1 || filtered.Trains[0].RouteID != "C" {
+		t.Fatalf("filtered trains = %#v, want only C", filtered.Trains)
+	}
+}
+
 func TestDecodeLeavesAmbiguousVehicleUnmatched(t *testing.T) {
 	sourceTime := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
 	feed := &gtfs.FeedMessage{
@@ -199,6 +226,13 @@ func tripDescriptor(tripID, routeID, startDate, startTime string) *gtfs.TripDesc
 		StartDate: proto.String(startDate),
 		StartTime: proto.String(startTime),
 	}
+}
+
+func tripUpdateEntity(entityID, tripID, routeID, stopID string) *gtfs.FeedEntity {
+	return &gtfs.FeedEntity{Id: proto.String(entityID), TripUpdate: &gtfs.TripUpdate{
+		Trip:           tripDescriptor(tripID, routeID, "20260902", "13:00:00"),
+		StopTimeUpdate: []*gtfs.TripUpdate_StopTimeUpdate{{StopId: proto.String(stopID)}},
+	}}
 }
 
 func mustMarshal(t *testing.T, message proto.Message) []byte {

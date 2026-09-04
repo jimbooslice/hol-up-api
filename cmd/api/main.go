@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,11 +17,18 @@ import (
 )
 
 const (
-	defaultAddress = ":8080"
-	defaultFeedURL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace"
-	pollInterval   = 30 * time.Second
-	staleAfter     = time.Minute
+	defaultAddress     = ":8080"
+	defaultACEFeedURL  = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace"
+	defaultNQRWFeedURL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw"
+	pollInterval       = 30 * time.Second
+	staleAfter         = time.Minute
 )
+
+type feed struct {
+	name   string
+	loader *ingest.Loader
+	store  *realtime.Store
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -35,8 +43,14 @@ func run(logger *slog.Logger) error {
 	defer stop()
 
 	store := realtime.NewStore()
-	loader := ingest.NewLoader(&http.Client{Timeout: 10 * time.Second}, store, env("MTA_GTFS_RT_URL", defaultFeedURL), "A")
-	go poll(ctx, logger, loader)
+	client := &http.Client{Timeout: 10 * time.Second}
+	feeds := []feed{
+		{name: "ace", store: realtime.NewStore()},
+		{name: "nqrw", store: realtime.NewStore()},
+	}
+	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, env("MTA_GTFS_RT_URL", defaultACEFeedURL), "")
+	feeds[1].loader = ingest.NewLoader(client, feeds[1].store, env("MTA_GTFS_RT_NQRW_URL", defaultNQRWFeedURL), "")
+	go poll(ctx, logger, store, feeds)
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
@@ -64,13 +78,8 @@ func run(logger *slog.Logger) error {
 	}
 }
 
-func poll(ctx context.Context, logger *slog.Logger, loader *ingest.Loader) {
-	load := func() {
-		if err := loader.Load(ctx); err != nil && !errors.Is(err, context.Canceled) {
-			logger.Warn("realtime feed refresh failed; retaining last known good snapshot", "error", err)
-		}
-	}
-	load()
+func poll(ctx context.Context, logger *slog.Logger, store *realtime.Store, feeds []feed) {
+	refresh(ctx, logger, store, feeds)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -79,7 +88,31 @@ func poll(ctx context.Context, logger *slog.Logger, loader *ingest.Loader) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			load()
+			refresh(ctx, logger, store, feeds)
+		}
+	}
+}
+
+func refresh(ctx context.Context, logger *slog.Logger, aggregate *realtime.Store, feeds []feed) {
+	var wait sync.WaitGroup
+	for _, source := range feeds {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if err := source.loader.Load(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Warn("realtime feed refresh failed; retaining last known good snapshot", "feed", source.name, "error", err)
+			}
+		}()
+	}
+	wait.Wait()
+
+	snapshots := make([]realtime.Snapshot, len(feeds))
+	for index, source := range feeds {
+		snapshots[index] = source.store.Load(time.Time{}, 0)
+	}
+	if snapshot, ok := realtime.Combine(snapshots...); ok {
+		if err := aggregate.Replace(snapshot); err != nil {
+			logger.Warn("aggregate realtime snapshot publication failed", "error", err)
 		}
 	}
 }
