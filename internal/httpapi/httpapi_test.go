@@ -45,6 +45,22 @@ func TestEndpointsUseFreshSnapshot(t *testing.T) {
 	}
 }
 
+func TestOpenAPI(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	NewHandler(realtime.NewStore(), time.Now, time.Minute).ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/openapi.yaml", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if got := recorder.Header().Get("Content-Type"); got != "application/yaml; charset=utf-8" {
+		t.Errorf("content type = %q", got)
+	}
+	for _, want := range []string{"openapi: 3.1.1", "/api/v1/trains:", "route_id:"} {
+		if !strings.Contains(recorder.Body.String(), want) {
+			t.Errorf("body missing %q", want)
+		}
+	}
+}
+
 func TestReadyAndErrors(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 12, 1, 0, 0, time.UTC)
 	handler := NewHandler(realtime.NewStore(), func() time.Time { return now }, time.Minute)

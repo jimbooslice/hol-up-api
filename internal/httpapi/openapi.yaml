@@ -1,0 +1,210 @@
+openapi: 3.1.1
+info:
+  title: Hol Up transit API
+  version: 1.0.0
+  description: Realtime MTA subway service from the ACE and N/Q/R/W GTFS-Realtime feeds.
+paths:
+  /healthz:
+    get:
+      summary: Liveness check
+      responses:
+        '200':
+          description: Process is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /readyz:
+    get:
+      summary: Realtime data readiness check
+      responses:
+        '200':
+          description: Realtime data is fresh.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+        '503':
+          description: Realtime data is unavailable or stale.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Readiness'
+  /api/v1/routes:
+    get:
+      summary: List route IDs in the current realtime snapshot
+      responses:
+        '200':
+          description: Active route IDs.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Routes'
+        '503':
+          $ref: '#/components/responses/SourceUnavailable'
+  /api/v1/trains:
+    get:
+      summary: List realtime trains for a route
+      parameters:
+        - name: route_id
+          in: query
+          required: true
+          description: A route ID returned by /api/v1/routes, such as A or W.
+          schema:
+            type: string
+          example: W
+      responses:
+        '200':
+          description: Realtime trains for the requested route. An empty list is valid.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Trains'
+        '400':
+          description: route_id was omitted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          $ref: '#/components/responses/SourceUnavailable'
+  /metrics:
+    get:
+      summary: Prometheus-compatible realtime metrics
+      responses:
+        '200':
+          description: Metrics in Prometheus text exposition format.
+          content:
+            text/plain:
+              schema:
+                type: string
+  /openapi.yaml:
+    get:
+      summary: This OpenAPI document
+      responses:
+        '200':
+          description: The API contract in YAML.
+          content:
+            application/yaml:
+              schema:
+                type: string
+components:
+  responses:
+    SourceUnavailable:
+      description: No realtime snapshot has loaded yet.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: ok
+    Readiness:
+      type: object
+      required: [status, freshness]
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+    Routes:
+      type: object
+      required: [as_of, freshness, routes]
+      properties:
+        as_of:
+          $ref: '#/components/schemas/Timestamp'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+        routes:
+          type: array
+          items:
+            type: string
+          example: [A, C, E, N, Q, R, W]
+    Trains:
+      type: object
+      required: [as_of, freshness, trains]
+      properties:
+        as_of:
+          $ref: '#/components/schemas/Timestamp'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+        trains:
+          type: array
+          items:
+            $ref: '#/components/schemas/Train'
+    Train:
+      type: object
+      required:
+        - entity_id
+        - route_id
+        - trip_id
+        - service_date
+        - direction_id
+        - direction
+        - next_stop_id
+        - next_stop_sequence
+        - predicted_at
+        - prediction_delay_seconds
+        - position_basis
+        - movement_state
+        - freshness
+        - source_timestamp
+      properties:
+        entity_id:
+          type: string
+        route_id:
+          type: string
+        trip_id:
+          type: string
+        service_date:
+          type: string
+          description: Service date in YYYYMMDD format.
+        direction_id:
+          type: [integer, 'null']
+          minimum: 0
+        direction:
+          type: string
+          enum: [northbound, eastbound, southbound, westbound, unknown]
+        next_stop_id:
+          type: string
+        next_stop_sequence:
+          type: integer
+          minimum: 0
+        predicted_at:
+          $ref: '#/components/schemas/Timestamp'
+        prediction_delay_seconds:
+          type: integer
+        position_basis:
+          type: string
+          enum: [realtime_prediction, schedule_fallback]
+        movement_state:
+          type: string
+          enum: [inferred_moving, reported_stopped, unknown]
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+        source_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+    Freshness:
+      type: string
+      enum: [fresh, stale, unavailable]
+    Timestamp:
+      type: [string, 'null']
+      format: date-time
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string

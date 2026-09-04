@@ -19,7 +19,9 @@ URL and `MTA_GTFS_RT_NQRW_URL` overrides the N/Q/R/W feed URL. A failed refresh
 never replaces that feed's last known good snapshot.
 
 Available endpoints are `GET /healthz`, `/readyz`, `/metrics`,
-`/api/v1/routes`, and `/api/v1/trains?route_id=A` (or another returned route).
+`/api/v1/routes`, `/api/v1/trains?route_id=A` (or another returned route), and
+`/openapi.yaml`. Open `http://localhost:8080/openapi.yaml` in a browser or
+pass it to an OpenAPI viewer for the complete API contract.
 
 ## Verify
 

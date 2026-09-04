@@ -2,6 +2,7 @@
 package httpapi
 
 import (
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,6 +11,9 @@ import (
 
 	"hol-up-prototype/internal/realtime"
 )
+
+//go:embed openapi.yaml
+var openAPI []byte
 
 type Handler struct {
 	store      *realtime.Store
@@ -34,6 +38,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	snapshot := h.store.Load(h.now(), h.staleAfter)
 	switch r.URL.Path {
+	case "/openapi.yaml":
+		w.Header().Set("Content-Type", "application/yaml; charset=utf-8")
+		_, _ = w.Write(openAPI)
 	case "/healthz":
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	case "/readyz":
