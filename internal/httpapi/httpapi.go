@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/telemetry"
 )
 
 //go:embed openapi.yaml
@@ -17,16 +18,14 @@ var openAPI []byte
 
 type Handler struct {
 	store      *realtime.Store
+	metrics    *telemetry.Store
 	now        func() time.Time
 	staleAfter time.Duration
 }
 
-// NewHandler constructs the public HTTP handler. A nil clock uses time.Now.
-func NewHandler(store *realtime.Store, now func() time.Time, staleAfter time.Duration) http.Handler {
-	if now == nil {
-		now = time.Now
-	}
-	return &Handler{store: store, now: now, staleAfter: staleAfter}
+// NewHandler constructs the public HTTP handler.
+func NewHandler(store *realtime.Store, metrics *telemetry.Store, now func() time.Time, staleAfter time.Duration) http.Handler {
+	return &Handler{store: store, metrics: metrics, now: now, staleAfter: staleAfter}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +74,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, trainsResponse{AsOf: timestamp(snapshot.SourceTimestamp), Freshness: snapshot.Freshness, Trains: trains})
 	case "/metrics":
-		writeMetrics(w, snapshot)
+		writeMetrics(w, snapshot, h.metrics.Snapshot(), h.now(), h.staleAfter)
 	default:
 		writeJSON(w, http.StatusNotFound, errorResponse("not_found", "endpoint not found"))
 	}
@@ -178,11 +177,26 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 
-func writeMetrics(w http.ResponseWriter, snapshot realtime.Snapshot) {
+func writeMetrics(w http.ResponseWriter, snapshot realtime.Snapshot, feeds []telemetry.Feed, now time.Time, staleAfter time.Duration) {
 	ready := 0
 	if snapshot.Freshness == realtime.FreshnessFresh {
 		ready = 1
 	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "# HELP holup_realtime_ready Whether realtime state is fresh.\n# TYPE holup_realtime_ready gauge\nholup_realtime_ready %d\n# HELP holup_realtime_trains Number of trains in the latest snapshot.\n# TYPE holup_realtime_trains gauge\nholup_realtime_trains %d\n", ready, len(snapshot.Trains))
+	_, _ = fmt.Fprintf(w, "# HELP holup_realtime_ready Whether realtime state is fresh.\n# TYPE holup_realtime_ready gauge\nholup_realtime_ready %d\n# HELP holup_realtime_trains Number of trains in the latest snapshot.\n# TYPE holup_realtime_trains gauge\nholup_realtime_trains %d\n# HELP holup_realtime_snapshot_timestamp_seconds Source timestamp of the aggregate snapshot.\n# TYPE holup_realtime_snapshot_timestamp_seconds gauge\nholup_realtime_snapshot_timestamp_seconds %d\n", ready, len(snapshot.Trains), unix(snapshot.SourceTimestamp))
+	_, _ = fmt.Fprint(w, "# HELP holup_realtime_feed_fresh Whether a feed's last-known-good snapshot is fresh.\n# TYPE holup_realtime_feed_fresh gauge\n# HELP holup_realtime_feed_source_timestamp_seconds Source timestamp of a feed's last-known-good snapshot.\n# TYPE holup_realtime_feed_source_timestamp_seconds gauge\n# HELP holup_realtime_feed_last_success_timestamp_seconds Local time of a feed's last successful refresh.\n# TYPE holup_realtime_feed_last_success_timestamp_seconds gauge\n# HELP holup_realtime_feed_trains Number of trains in a feed's last-known-good snapshot.\n# TYPE holup_realtime_feed_trains gauge\n# HELP holup_realtime_feed_refreshes_total Completed feed refreshes by outcome.\n# TYPE holup_realtime_feed_refreshes_total counter\n# HELP holup_realtime_feed_last_refresh_duration_seconds Duration of the most recent feed refresh.\n# TYPE holup_realtime_feed_last_refresh_duration_seconds gauge\n")
+	for _, feed := range feeds {
+		fresh := 0
+		if realtime.FreshnessAt(feed.SourceTimestamp, now, staleAfter) == realtime.FreshnessFresh {
+			fresh = 1
+		}
+		_, _ = fmt.Fprintf(w, "holup_realtime_feed_fresh{feed=%q} %d\nholup_realtime_feed_source_timestamp_seconds{feed=%q} %d\nholup_realtime_feed_last_success_timestamp_seconds{feed=%q} %d\nholup_realtime_feed_trains{feed=%q} %d\nholup_realtime_feed_refreshes_total{feed=%q,outcome=%q} %d\nholup_realtime_feed_refreshes_total{feed=%q,outcome=%q} %d\nholup_realtime_feed_last_refresh_duration_seconds{feed=%q} %g\n", feed.Name, fresh, feed.Name, unix(feed.SourceTimestamp), feed.Name, unix(feed.LastSuccess), feed.Name, feed.TrainCount, feed.Name, "success", feed.RefreshSuccesses, feed.Name, "error", feed.RefreshErrors, feed.Name, feed.LastRefreshDuration.Seconds())
+	}
+}
+
+func unix(value time.Time) int64 {
+	if value.IsZero() {
+		return 0
+	}
+	return value.Unix()
 }

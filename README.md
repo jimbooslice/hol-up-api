@@ -23,6 +23,11 @@ Available endpoints are `GET /healthz`, `/readyz`, `/metrics`,
 `/openapi.yaml`. Open `http://localhost:8080/openapi.yaml` in a browser or
 pass it to an OpenAPI viewer for the complete API contract.
 
+`/metrics` uses Prometheus's text exposition format. Alongside aggregate
+readiness and train count, it reports bounded per-feed refresh outcomes,
+durations, timestamps, freshness, and train counts with `feed="ace"` or
+`feed="nqrw"` labels.
+
 ## Verify
 
 ```sh

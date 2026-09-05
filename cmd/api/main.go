@@ -14,6 +14,7 @@ import (
 	"hol-up-prototype/internal/httpapi"
 	"hol-up-prototype/internal/ingest"
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/telemetry"
 )
 
 const (
@@ -50,11 +51,12 @@ func run(logger *slog.Logger) error {
 	}
 	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, env("MTA_GTFS_RT_URL", defaultACEFeedURL), "")
 	feeds[1].loader = ingest.NewLoader(client, feeds[1].store, env("MTA_GTFS_RT_NQRW_URL", defaultNQRWFeedURL), "")
-	go poll(ctx, logger, store, feeds)
+	metrics := telemetry.New(feeds[0].name, feeds[1].name)
+	go poll(ctx, logger, store, metrics, feeds)
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
-		Handler:           httpapi.NewHandler(store, time.Now, staleAfter),
+		Handler:           httpapi.NewHandler(store, metrics, time.Now, staleAfter),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       time.Minute,
@@ -78,8 +80,8 @@ func run(logger *slog.Logger) error {
 	}
 }
 
-func poll(ctx context.Context, logger *slog.Logger, store *realtime.Store, feeds []feed) {
-	refresh(ctx, logger, store, feeds)
+func poll(ctx context.Context, logger *slog.Logger, store *realtime.Store, metrics *telemetry.Store, feeds []feed) {
+	refresh(ctx, logger, store, metrics, feeds)
 
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
@@ -88,18 +90,22 @@ func poll(ctx context.Context, logger *slog.Logger, store *realtime.Store, feeds
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			refresh(ctx, logger, store, feeds)
+			refresh(ctx, logger, store, metrics, feeds)
 		}
 	}
 }
 
-func refresh(ctx context.Context, logger *slog.Logger, aggregate *realtime.Store, feeds []feed) {
+func refresh(ctx context.Context, logger *slog.Logger, aggregate *realtime.Store, metrics *telemetry.Store, feeds []feed) {
 	var wait sync.WaitGroup
 	for _, source := range feeds {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			if err := source.loader.Load(ctx); err != nil && !errors.Is(err, context.Canceled) {
+			started := time.Now()
+			err := source.loader.Load(ctx)
+			snapshot := source.store.Load(time.Time{}, 0)
+			metrics.Record(source.name, err == nil, time.Since(started), time.Now(), snapshot.SourceTimestamp, len(snapshot.Trains))
+			if err != nil && !errors.Is(err, context.Canceled) {
 				logger.Warn("realtime feed refresh failed; retaining last known good snapshot", "feed", source.name, "error", err)
 			}
 		}()

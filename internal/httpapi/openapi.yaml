@@ -70,7 +70,7 @@ paths:
           $ref: '#/components/responses/SourceUnavailable'
   /metrics:
     get:
-      summary: Prometheus-compatible realtime metrics
+      summary: Prometheus-compatible aggregate and per-feed realtime metrics
       responses:
         '200':
           description: Metrics in Prometheus text exposition format.

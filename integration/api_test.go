@@ -13,6 +13,7 @@ import (
 	"hol-up-prototype/internal/httpapi"
 	"hol-up-prototype/internal/ingest"
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/telemetry"
 )
 
 func TestProtobufFeedToTrainsAPI(t *testing.T) {
@@ -40,7 +41,7 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := httpapi.NewHandler(store, func() time.Time { return nqrwTime }, time.Minute)
+	handler := httpapi.NewHandler(store, telemetry.New(), func() time.Time { return nqrwTime }, time.Minute)
 	recorder := request(handler, "/api/v1/trains?route_id=A")
 
 	if recorder.Code != http.StatusOK {
@@ -64,7 +65,7 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 		t.Fatalf("N trains status/body = %d/%s", nqrwRecorder.Code, nqrwRecorder.Body.String())
 	}
 
-	staleHandler := httpapi.NewHandler(store, func() time.Time { return now.Add(61 * time.Second) }, time.Minute)
+	staleHandler := httpapi.NewHandler(store, telemetry.New(), func() time.Time { return now.Add(61 * time.Second) }, time.Minute)
 	if got := request(staleHandler, "/readyz"); got.Code != http.StatusServiceUnavailable {
 		t.Fatalf("stale readiness status = %d, want 503", got.Code)
 	}

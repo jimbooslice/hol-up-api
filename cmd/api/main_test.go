@@ -15,6 +15,7 @@ import (
 	"hol-up-prototype/internal/gen/gtfs"
 	"hol-up-prototype/internal/ingest"
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/telemetry"
 )
 
 func TestEnv(t *testing.T) {
@@ -39,6 +40,7 @@ func TestRefreshPublishesHealthyFeedWithOtherFeedsLastKnownGood(t *testing.T) {
 	defer nqrw.Close()
 
 	aggregate := realtime.NewStore()
+	metrics := telemetry.New("ace", "nqrw")
 	feeds := []feed{
 		{name: "ace", store: realtime.NewStore()},
 		{name: "nqrw", store: realtime.NewStore()},
@@ -48,8 +50,8 @@ func TestRefreshPublishesHealthyFeedWithOtherFeedsLastKnownGood(t *testing.T) {
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-	refresh(context.Background(), logger, aggregate, feeds)
-	refresh(context.Background(), logger, aggregate, feeds)
+	refresh(context.Background(), logger, aggregate, metrics, feeds)
+	refresh(context.Background(), logger, aggregate, metrics, feeds)
 	got := aggregate.Load(base.Add(30*time.Second), time.Minute)
 	if !got.SourceTimestamp.Equal(base) || len(got.Trains) != 2 {
 		t.Fatalf("aggregate = %#v, want retained A and refreshed Q", got)
@@ -62,6 +64,14 @@ func TestRefreshPublishesHealthyFeedWithOtherFeedsLastKnownGood(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "feed=ace") {
 		t.Fatalf("refresh failure log = %q, want feed name", logs.String())
+	}
+	for _, feed := range metrics.Snapshot() {
+		if feed.LastSuccess.IsZero() || feed.RefreshSuccesses == 0 {
+			t.Fatalf("metrics for %s = %#v, want successful refresh", feed.Name, feed)
+		}
+		if feed.Name == "ace" && feed.RefreshErrors != 1 {
+			t.Fatalf("ACE metrics = %#v, want one failed refresh", feed)
+		}
 	}
 }
 
