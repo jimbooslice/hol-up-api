@@ -13,6 +13,7 @@ import (
 
 	"google.golang.org/protobuf/proto"
 	"hol-up-prototype/internal/gen/gtfs"
+	"hol-up-prototype/internal/httpapi"
 	"hol-up-prototype/internal/ingest"
 	"hol-up-prototype/internal/realtime"
 	"hol-up-prototype/internal/telemetry"
@@ -32,35 +33,63 @@ func TestEnv(t *testing.T) {
 	}
 }
 
-func TestRefreshPublishesHealthyFeedWithOtherFeedsLastKnownGood(t *testing.T) {
+func TestRefreshPublishesAvailableFeedAtStartup(t *testing.T) {
+	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
+	ace := feedServer(t, feedBytes(t, base, "A", "trip-a"))
+	defer ace.Close()
+	nqrw := feedServer(t, []byte("bad protobuf"))
+	defer nqrw.Close()
+
+	metrics := telemetry.New("ace", "nqrw")
+	feeds := []feed{
+		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
+		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
+	}
+	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "")
+	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "")
+
+	refresh(context.Background(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), metrics, feeds)
+	if got := feeds[0].store.Load(base, time.Minute); len(got.Trains) != 1 || got.Trains[0].RouteID != "A" {
+		t.Fatalf("ACE snapshot = %#v, want available A train", got)
+	}
+	if _, freshness, _ := feeds[1].store.Status(base, time.Minute); freshness != realtime.FreshnessUnavailable {
+		t.Fatalf("N/Q/R/W freshness = %q, want unavailable", freshness)
+	}
+	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute)
+	if recorder := apiRequest(handler, "/api/v1/trains?route_id=A"); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"coverage":"complete"`) {
+		t.Fatalf("partial A API = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := apiRequest(handler, "/api/v1/routes"); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"coverage":"partial"`) {
+		t.Fatalf("partial routes API = %d/%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRefreshRetainsLastKnownGoodPerFeed(t *testing.T) {
 	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
 	ace := feedServer(t, feedBytes(t, base, "A", "trip-a"), []byte("bad protobuf"))
 	defer ace.Close()
 	nqrw := feedServer(t, feedBytes(t, base.Add(10*time.Second), "N", "trip-n"), feedBytes(t, base.Add(20*time.Second), "Q", "trip-q"))
 	defer nqrw.Close()
 
-	aggregate := realtime.NewStore()
 	metrics := telemetry.New("ace", "nqrw")
 	feeds := []feed{
-		{name: "ace", store: realtime.NewStore()},
-		{name: "nqrw", store: realtime.NewStore()},
+		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
+		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
 	}
 	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "")
 	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "")
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
-	refresh(context.Background(), logger, aggregate, metrics, feeds)
-	refresh(context.Background(), logger, aggregate, metrics, feeds)
-	got := aggregate.Load(base.Add(30*time.Second), time.Minute)
-	if !got.SourceTimestamp.Equal(base) || len(got.Trains) != 2 {
-		t.Fatalf("aggregate = %#v, want retained A and refreshed Q", got)
+	refresh(context.Background(), logger, metrics, feeds)
+	refresh(context.Background(), logger, metrics, feeds)
+	aceSnapshot := feeds[0].store.Load(base.Add(30*time.Second), time.Minute)
+	nqrwSnapshot := feeds[1].store.Load(base.Add(30*time.Second), time.Minute)
+	if len(aceSnapshot.Trains) != 1 || aceSnapshot.Trains[0].RouteID != "A" || !aceSnapshot.SourceTimestamp.Equal(base) {
+		t.Fatalf("ACE snapshot = %#v, want retained A", aceSnapshot)
 	}
-	if got.Trains[0].RouteID != "A" || got.Trains[1].RouteID != "Q" {
-		t.Fatalf("aggregate routes = %q/%q, want A/Q", got.Trains[0].RouteID, got.Trains[1].RouteID)
-	}
-	if !got.Trains[0].SourceTimestamp.Equal(base) || !got.Trains[1].SourceTimestamp.Equal(base.Add(20*time.Second)) {
-		t.Fatalf("source timestamps = %s/%s", got.Trains[0].SourceTimestamp, got.Trains[1].SourceTimestamp)
+	if len(nqrwSnapshot.Trains) != 1 || nqrwSnapshot.Trains[0].RouteID != "Q" || !nqrwSnapshot.SourceTimestamp.Equal(base.Add(20*time.Second)) {
+		t.Fatalf("N/Q/R/W snapshot = %#v, want refreshed Q", nqrwSnapshot)
 	}
 	if !strings.Contains(logs.String(), "feed=ace") {
 		t.Fatalf("refresh failure log = %q, want feed name", logs.String())
@@ -72,6 +101,84 @@ func TestRefreshPublishesHealthyFeedWithOtherFeedsLastKnownGood(t *testing.T) {
 		if feed.Name == "ace" && feed.RefreshErrors != 1 {
 			t.Fatalf("ACE metrics = %#v, want one failed refresh", feed)
 		}
+	}
+}
+
+func TestRefreshPublishesFastFeedBeforeSlowFeedCompletes(t *testing.T) {
+	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
+	releaseSlow := make(chan struct{})
+	slowFeed := feedBytes(t, base, "N", "trip-n")
+	slow := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		<-releaseSlow
+		_, _ = response.Write(slowFeed)
+	}))
+	defer slow.Close()
+	defer close(releaseSlow)
+	fast := feedServer(t, feedBytes(t, base, "A", "trip-a"))
+	defer fast.Close()
+
+	metrics := telemetry.New("ace", "nqrw")
+	feeds := []feed{
+		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
+		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
+	}
+	feeds[0].loader = ingest.NewLoader(fast.Client(), feeds[0].store, fast.URL, "")
+	feeds[1].loader = ingest.NewLoader(slow.Client(), feeds[1].store, slow.URL, "")
+	done := make(chan struct{})
+	go func() {
+		refresh(context.Background(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), metrics, feeds)
+		close(done)
+	}()
+
+	deadline := time.After(time.Second)
+	for {
+		if _, freshness, _ := feeds[0].store.Status(base, time.Minute); freshness == realtime.FreshnessFresh {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("fast feed was not published while slow feed was blocked")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case <-done:
+		t.Fatal("refresh completed while slow feed was blocked")
+	default:
+	}
+	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute)
+	if recorder := apiRequest(handler, "/api/v1/trains?route_id=A"); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"coverage":"complete"`) {
+		t.Fatalf("fast-feed API status = %d/%s", recorder.Code, recorder.Body.String())
+	}
+	releaseSlow <- struct{}{}
+	<-done
+}
+
+func TestRefreshAcceptsRecoveredFeedOlderThanOtherFeed(t *testing.T) {
+	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
+	ace := feedServer(t, []byte("bad protobuf"), feedBytes(t, base, "A", "trip-a"))
+	defer ace.Close()
+	nqrw := feedServer(t, feedBytes(t, base.Add(time.Minute), "N", "trip-n"), feedBytes(t, base.Add(2*time.Minute), "Q", "trip-q"))
+	defer nqrw.Close()
+
+	metrics := telemetry.New("ace", "nqrw")
+	feeds := []feed{
+		{name: "ace", store: realtime.NewStore()},
+		{name: "nqrw", store: realtime.NewStore()},
+	}
+	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "")
+	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "")
+	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
+
+	refresh(context.Background(), logger, metrics, feeds)
+	refresh(context.Background(), logger, metrics, feeds)
+	aceSnapshot := feeds[0].store.Load(base.Add(2*time.Minute), 0)
+	nqrwSnapshot := feeds[1].store.Load(base.Add(2*time.Minute), 0)
+	if len(aceSnapshot.Trains) != 1 || !aceSnapshot.SourceTimestamp.Equal(base) {
+		t.Fatalf("recovered ACE snapshot = %#v, want older cross-feed timestamp accepted", aceSnapshot)
+	}
+	if len(nqrwSnapshot.Trains) != 1 || !nqrwSnapshot.SourceTimestamp.Equal(base.Add(2*time.Minute)) {
+		t.Fatalf("N/Q/R/W snapshot = %#v, want independently refreshed feed", nqrwSnapshot)
 	}
 }
 
@@ -97,4 +204,18 @@ func feedBytes(t *testing.T, timestamp time.Time, routeID, tripID string) []byte
 		t.Fatal(err)
 	}
 	return wire
+}
+
+func feedSources(feeds []feed) []httpapi.Source {
+	sources := make([]httpapi.Source, len(feeds))
+	for index, feed := range feeds {
+		sources[index] = httpapi.Source{Name: feed.name, Routes: feed.routes, Store: feed.store}
+	}
+	return sources
+}
+
+func apiRequest(handler http.Handler, target string) *httptest.ResponseRecorder {
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
+	return recorder
 }

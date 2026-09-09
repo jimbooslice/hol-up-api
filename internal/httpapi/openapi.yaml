@@ -19,23 +19,23 @@ paths:
       summary: Realtime data readiness check
       responses:
         '200':
-          description: Realtime data is fresh.
+          description: At least one configured realtime source is fresh.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Readiness'
         '503':
-          description: Realtime data is unavailable or stale.
+          description: No configured realtime source is fresh.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Readiness'
   /api/v1/routes:
     get:
-      summary: List route IDs in the current realtime snapshot
+      summary: List route IDs in the available realtime snapshots
       responses:
         '200':
-          description: Active route IDs.
+          description: Active route IDs from every source that has loaded.
           content:
             application/json:
               schema:
@@ -55,7 +55,7 @@ paths:
           example: W
       responses:
         '200':
-          description: Realtime trains for the requested route. An empty list is valid.
+          description: Realtime trains for the requested route. An empty list is valid only when every relevant source has loaded.
           content:
             application/json:
               schema:
@@ -91,11 +91,11 @@ paths:
 components:
   responses:
     SourceUnavailable:
-      description: No realtime snapshot has loaded yet.
+      description: A source required to answer the request has not loaded yet.
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/Error'
+            $ref: '#/components/schemas/SourceError'
   schemas:
     Health:
       type: object
@@ -106,21 +106,33 @@ components:
           example: ok
     Readiness:
       type: object
-      required: [status, freshness]
+      required: [status, freshness, coverage, sources]
       properties:
         status:
           type: string
           enum: [ready, not_ready]
         freshness:
           $ref: '#/components/schemas/Freshness'
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
     Routes:
       type: object
-      required: [as_of, freshness, routes]
+      required: [as_of, freshness, coverage, sources, routes]
       properties:
         as_of:
           $ref: '#/components/schemas/Timestamp'
         freshness:
           $ref: '#/components/schemas/Freshness'
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
         routes:
           type: array
           items:
@@ -128,12 +140,18 @@ components:
           example: [A, C, E, N, Q, R, W]
     Trains:
       type: object
-      required: [as_of, freshness, trains]
+      required: [as_of, freshness, coverage, sources, trains]
       properties:
         as_of:
           $ref: '#/components/schemas/Timestamp'
         freshness:
           $ref: '#/components/schemas/Freshness'
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
         trains:
           type: array
           items:
@@ -190,6 +208,27 @@ components:
           $ref: '#/components/schemas/Freshness'
         source_timestamp:
           $ref: '#/components/schemas/Timestamp'
+    Source:
+      type: object
+      required: [name, routes, source_timestamp, freshness]
+      properties:
+        name:
+          type: string
+          description: Stable configured feed name.
+          enum: [ace, nqrw]
+        routes:
+          type: array
+          description: Route IDs configured as owned by this source, independent of currently active trains.
+          items:
+            type: string
+        source_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+    Coverage:
+      type: string
+      description: Whether all, some, or none of the sources relevant to this request have loaded a snapshot.
+      enum: [complete, partial, unavailable]
     Freshness:
       type: string
       enum: [fresh, stale, unavailable]
@@ -208,3 +247,15 @@ components:
               type: string
             message:
               type: string
+    SourceError:
+      allOf:
+        - $ref: '#/components/schemas/Error'
+        - type: object
+          required: [coverage, sources]
+          properties:
+            coverage:
+              $ref: '#/components/schemas/Coverage'
+            sources:
+              type: array
+              items:
+                $ref: '#/components/schemas/Source'

@@ -32,16 +32,11 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 	if err := ingest.NewLoader(nqrw.Client(), nqrwStore, nqrw.URL, "").Load(t.Context()); err != nil {
 		t.Fatalf("load N/Q/R/W: %v", err)
 	}
-	combined, ok := realtime.Combine(aceStore.Load(now, 0), nqrwStore.Load(now, 0))
-	if !ok {
-		t.Fatal("Combine() did not publish two loaded feeds")
+	sources := []httpapi.Source{
+		{Name: "ace", Routes: []string{"A", "C", "E"}, Store: aceStore},
+		{Name: "nqrw", Routes: []string{"N", "Q", "R", "W"}, Store: nqrwStore},
 	}
-	store := realtime.NewStore()
-	if err := store.Replace(combined); err != nil {
-		t.Fatal(err)
-	}
-
-	handler := httpapi.NewHandler(store, telemetry.New(), func() time.Time { return nqrwTime }, time.Minute)
+	handler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return nqrwTime }, time.Minute)
 	recorder := request(handler, "/api/v1/trains?route_id=A")
 
 	if recorder.Code != http.StatusOK {
@@ -65,9 +60,9 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 		t.Fatalf("N trains status/body = %d/%s", nqrwRecorder.Code, nqrwRecorder.Body.String())
 	}
 
-	staleHandler := httpapi.NewHandler(store, telemetry.New(), func() time.Time { return now.Add(61 * time.Second) }, time.Minute)
-	if got := request(staleHandler, "/readyz"); got.Code != http.StatusServiceUnavailable {
-		t.Fatalf("stale readiness status = %d, want 503", got.Code)
+	staleHandler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return now.Add(61 * time.Second) }, time.Minute)
+	if got := request(staleHandler, "/readyz"); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"coverage":"complete"`) {
+		t.Fatalf("mixed-source readiness = %d/%s, want complete 200", got.Code, got.Body.String())
 	}
 	staleN := request(staleHandler, "/api/v1/trains?route_id=N")
 	var response struct {
@@ -79,8 +74,12 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 	if err := json.Unmarshal(staleN.Body.Bytes(), &response); err != nil {
 		t.Fatal(err)
 	}
-	if staleN.Code != http.StatusOK || response.Freshness != realtime.FreshnessStale || len(response.Trains) != 1 || response.Trains[0].Freshness != realtime.FreshnessFresh {
-		t.Fatalf("stale-source response = %d/%#v", staleN.Code, response)
+	if staleN.Code != http.StatusOK || response.Freshness != realtime.FreshnessFresh || len(response.Trains) != 1 || response.Trains[0].Freshness != realtime.FreshnessFresh {
+		t.Fatalf("route-specific N response = %d/%#v", staleN.Code, response)
+	}
+	staleA := request(staleHandler, "/api/v1/trains?route_id=A")
+	if staleA.Code != http.StatusOK || !strings.Contains(staleA.Body.String(), `"freshness":"stale"`) {
+		t.Fatalf("route-specific A response = %d/%s", staleA.Code, staleA.Body.String())
 	}
 }
 

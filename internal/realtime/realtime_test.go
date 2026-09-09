@@ -102,25 +102,38 @@ func TestEmptyStoreIsUnavailable(t *testing.T) {
 	}
 }
 
-func TestCombineRequiresAllSourcesAndUsesOldestTimestamp(t *testing.T) {
-	older := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
-	newer := older.Add(20 * time.Second)
-	if _, ok := Combine(Snapshot{SourceTimestamp: older}, Snapshot{}); ok {
-		t.Fatal("Combine() published before every source loaded")
+func TestStoreSortsSnapshotOnReplace(t *testing.T) {
+	store := NewStore()
+	sourceTime := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	if err := store.Replace(Snapshot{SourceTimestamp: sourceTime, Trains: []Train{
+		{RouteID: "N", TripID: "trip-n"},
+		{RouteID: "A", TripID: "trip-z"},
+		{RouteID: "A", TripID: "trip-a"},
+	}}); err != nil {
+		t.Fatal(err)
 	}
 
-	combined, ok := Combine(
-		Snapshot{SourceTimestamp: newer, Trains: []Train{{RouteID: "N", TripID: "trip-n", SourceTimestamp: newer}}},
-		Snapshot{SourceTimestamp: older, Trains: []Train{{RouteID: "A", TripID: "trip-z", SourceTimestamp: older}, {RouteID: "A", TripID: "trip-a", SourceTimestamp: older}}},
-	)
-	if !ok || !combined.SourceTimestamp.Equal(older) {
-		t.Fatalf("Combine() = %#v/%v, want oldest timestamp", combined, ok)
-	}
-	got := []string{combined.Trains[0].TripID, combined.Trains[1].TripID, combined.Trains[2].TripID}
+	loaded := store.Load(sourceTime, time.Minute)
+	got := []string{loaded.Trains[0].TripID, loaded.Trains[1].TripID, loaded.Trains[2].TripID}
 	want := []string{"trip-a", "trip-z", "trip-n"}
 	for index := range want {
 		if got[index] != want[index] {
-			t.Fatalf("combined train order = %v, want %v", got, want)
+			t.Fatalf("train order = %v, want %v", got, want)
 		}
+	}
+}
+
+func TestStoreStatusReturnsMetadata(t *testing.T) {
+	store := NewStore()
+	if timestamp, freshness, trains := store.Status(time.Now(), time.Minute); !timestamp.IsZero() || freshness != FreshnessUnavailable || trains != 0 {
+		t.Fatalf("empty Status() = %s/%q/%d, want zero/unavailable/0", timestamp, freshness, trains)
+	}
+
+	sourceTime := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	if err := store.Replace(Snapshot{SourceTimestamp: sourceTime, Trains: []Train{{TripID: "trip-a"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if timestamp, freshness, trains := store.Status(sourceTime.Add(time.Minute), time.Minute); !timestamp.Equal(sourceTime) || freshness != FreshnessFresh || trains != 1 {
+		t.Fatalf("Status() = %s/%q/%d, want %s/fresh/1", timestamp, freshness, trains, sourceTime)
 	}
 }

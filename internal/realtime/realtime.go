@@ -82,25 +82,6 @@ func NewStore() *Store {
 	return &Store{}
 }
 
-// Combine returns one snapshot only when every source has loaded. The oldest
-// source timestamp makes aggregate freshness reflect the least-fresh source.
-func Combine(snapshots ...Snapshot) (Snapshot, bool) {
-	if len(snapshots) == 0 {
-		return Snapshot{}, false
-	}
-	combined := Snapshot{SourceTimestamp: snapshots[0].SourceTimestamp}
-	for _, snapshot := range snapshots {
-		if snapshot.SourceTimestamp.IsZero() {
-			return Snapshot{}, false
-		}
-		if snapshot.SourceTimestamp.Before(combined.SourceTimestamp) {
-			combined.SourceTimestamp = snapshot.SourceTimestamp
-		}
-		combined.Trains = append(combined.Trains, snapshot.Trains...)
-	}
-	return cloneSnapshot(combined), true
-}
-
 // Replace publishes next only when it is structurally usable.
 func (s *Store) Replace(next Snapshot) error {
 	if next.SourceTimestamp.IsZero() {
@@ -113,6 +94,15 @@ func (s *Store) Replace(next Snapshot) error {
 			next.Trains[index].SourceTimestamp = next.SourceTimestamp
 		}
 	}
+	sort.Slice(next.Trains, func(left, right int) bool {
+		if next.Trains[left].RouteID != next.Trains[right].RouteID {
+			return next.Trains[left].RouteID < next.Trains[right].RouteID
+		}
+		if next.Trains[left].TripID != next.Trains[right].TripID {
+			return next.Trains[left].TripID < next.Trains[right].TripID
+		}
+		return next.Trains[left].EntityID < next.Trains[right].EntityID
+	})
 	for {
 		current := s.snapshot.Load()
 		if current != nil && next.SourceTimestamp.Before(current.SourceTimestamp) {
@@ -144,6 +134,15 @@ func (s *Store) Load(now time.Time, staleAfter time.Duration) Snapshot {
 	return result
 }
 
+// Status returns source metadata without copying the trains in the snapshot.
+func (s *Store) Status(now time.Time, staleAfter time.Duration) (time.Time, Freshness, int) {
+	current := s.snapshot.Load()
+	if current == nil {
+		return time.Time{}, FreshnessUnavailable, 0
+	}
+	return current.SourceTimestamp, FreshnessAt(current.SourceTimestamp, now, staleAfter), len(current.Trains)
+}
+
 // FreshnessAt classifies a source timestamp. A non-positive staleAfter leaves
 // valid data fresh; callers that need a stale policy must supply a duration.
 func FreshnessAt(sourceTimestamp, now time.Time, staleAfter time.Duration) Freshness {
@@ -165,14 +164,5 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 			result.Trains[index].DirectionID = &directionCopy
 		}
 	}
-	sort.Slice(result.Trains, func(left, right int) bool {
-		if result.Trains[left].RouteID != result.Trains[right].RouteID {
-			return result.Trains[left].RouteID < result.Trains[right].RouteID
-		}
-		if result.Trains[left].TripID != result.Trains[right].TripID {
-			return result.Trains[left].TripID < result.Trains[right].TripID
-		}
-		return result.Trains[left].EntityID < result.Trains[right].EntityID
-	})
 	return result
 }
