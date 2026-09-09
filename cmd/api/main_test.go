@@ -33,6 +33,61 @@ func TestEnv(t *testing.T) {
 	}
 }
 
+func TestConfiguredFeedsCoverMTARealtimeSubwayRoutes(t *testing.T) {
+	for _, name := range []string{
+		"MTA_GTFS_RT_URL",
+		"MTA_GTFS_RT_BDFM_URL",
+		"MTA_GTFS_RT_G_URL",
+		"MTA_GTFS_RT_JZ_URL",
+		"MTA_GTFS_RT_L_URL",
+		"MTA_GTFS_RT_NQRW_URL",
+		"MTA_GTFS_RT_NUMBERED_URL",
+		"MTA_GTFS_RT_SI_URL",
+	} {
+		t.Setenv(name, "")
+	}
+
+	expected := map[string]struct {
+		routes string
+		url    string
+	}{
+		"ace":      {"A,C,E,H", defaultACEFeedURL},
+		"bdfm":     {"B,D,F,FX,M,FS", defaultBDFMFeedURL},
+		"g":        {"G", defaultGFeedURL},
+		"jz":       {"J,Z", defaultJZFeedURL},
+		"l":        {"L", defaultLFeedURL},
+		"nqrw":     {"N,Q,R,W", defaultNQRWFeedURL},
+		"numbered": {"1,2,3,4,5,6,6X,7,7X,GS", defaultNumberedFeedURL},
+		"si":       {"SI,SS", defaultSIFeedURL},
+	}
+	feeds := configuredFeeds(http.DefaultClient)
+	if len(feeds) != len(expected) {
+		t.Fatalf("configured feeds = %d, want %d", len(feeds), len(expected))
+	}
+	owners := make(map[string]string)
+	for _, feed := range feeds {
+		want, ok := expected[feed.name]
+		if !ok {
+			t.Fatalf("unexpected feed %q", feed.name)
+		}
+		if got := strings.Join(feed.routes, ","); got != want.routes || feed.url != want.url {
+			t.Fatalf("feed %q = routes %q, URL %q; want routes %q, URL %q", feed.name, got, feed.url, want.routes, want.url)
+		}
+		if feed.store == nil || feed.loader == nil {
+			t.Fatalf("feed %q is not initialized", feed.name)
+		}
+		for _, route := range feed.routes {
+			if owner, exists := owners[route]; exists {
+				t.Fatalf("route %q is owned by both %q and %q", route, owner, feed.name)
+			}
+			owners[route] = feed.name
+		}
+	}
+	if len(owners) != 30 {
+		t.Fatalf("configured route IDs = %d, want 30", len(owners))
+	}
+}
+
 func TestRefreshPublishesAvailableFeedAtStartup(t *testing.T) {
 	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
 	ace := feedServer(t, feedBytes(t, base, "A", "trip-a"))

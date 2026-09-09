@@ -2,7 +2,7 @@
 
 ## Summary
 
-Build an interview-ready transit platform as a Go modular monolith with a TypeScript/MapLibre UI. The repository already has a Go API that polls the MTA ACE and N/Q/R/W GTFS-Realtime feeds, decodes protobuf messages, retains last-known-good snapshots, and serves route and train endpoints. Static GTFS ingestion, map projection, alerts, journey planning, persistence, the UI, and the assistant are future work.
+Build an interview-ready transit platform as a Go modular monolith with a TypeScript/MapLibre UI. The repository already has a Go API that polls all eight feeds in MTA's Subway Realtime catalog, decodes protobuf messages, retains per-source last-known-good snapshots, and serves route and train endpoints. Static GTFS ingestion, map projection, alerts, journey planning, persistence, the UI, and the assistant are future work.
 
 Start by making the existing realtime facts safe to rely on. Then add schedule projection, all-route map data, deterministic line status and journey impact, and finally a deferred LLM explanation layer.
 
@@ -26,7 +26,7 @@ The LLM is neither the source of truth nor the route planner. If it or LiteLLM f
 - Track freshness separately for the feed, trip update, and vehicle observation. Do not call an old vehicle state fresh merely because it arrived in a new feed; stale movement state is `unknown`.
 - Match vehicles to trip instances only when the association is unambiguous in both directions. Keep movement unknown when a partial descriptor could apply to more than one instance.
 - Retain complete ordered stop predictions, stop relationships, cancellations, and source provenance in normalized state. Derive compact train responses from this model rather than discarding data needed by station arrivals, journey overlays, and skip-stop handling.
-- Publish available feeds independently. A/C/E queries depend on the ACE feed and N/Q/R/W queries on the NQRW feed. Preserve additional observed routes; return their available trains with partial coverage when another feed has not loaded, but do not return an empty result for an unobserved route until every feed has loaded. Expose `complete`, `partial`, or `unavailable` coverage and per-source configured routes, timestamps, and freshness. Keep process liveness separate from complete-source freshness.
+- Publish all eight realtime feeds independently. A known route query depends only on its owning feed. Preserve additional observed routes; return their available trains with partial coverage when another feed has not loaded, but do not return an empty result for an unobserved route until every feed has loaded. Expose `complete`, `partial`, or `unavailable` coverage and per-source configured routes, timestamps, and freshness. Keep process liveness separate from complete-source freshness.
 - Dispatch health and static-document requests before reading the realtime snapshot. Sort published snapshots once; do not copy and sort all trains for every inexpensive request.
 - Load MTA’s supplemented GTFS at startup and hourly, retaining a last-known-good dataset atomically. Use regular GTFS only when no valid supplemented dataset is available. The supplemented feed covers most, not all, changes for the next seven calendar days and is updated hourly. [MTA developer resources](https://www.mta.info/developers)
 - Parse GTFS by CSV headers. Resolve service in `America/New_York` using `calendar.txt` and `calendar_dates.txt`, including daylight-saving boundaries and times beyond 24:00. Include timezone data in the runtime image or embed it in the Go binary.
@@ -135,10 +135,10 @@ Successful realtime responses include `coverage` and `sources`; each source repo
 
 ## Delivery Sequence
 
-1. **Realtime correctness:** add timestamp-skew validation, optional prediction semantics, observation freshness, unambiguous matching, partial-feed coverage, and low-cost health endpoints. Partial-feed API behavior is the current increment; failure/recovery logging improvements and local Grafana/Loki containers follow in the next phase.
+1. **Realtime correctness:** add timestamp-skew validation, optional prediction semantics, observation freshness, unambiguous matching, partial-feed coverage, and low-cost health endpoints. Partial-feed API behavior and all eight realtime feed groups are implemented; failure/recovery logging improvements and local Grafana/Loki containers follow in the next phase.
 2. **Schedule projection:** ingest and atomically publish supplemented/regular schedules and routing indexes; implement MTA reconciliation, replacement periods, A-line station/shape projection, and provenance.
 3. **Capture and replay:** record bounded raw snapshots through `SnapshotStore`, add a controllable clock, and replay rush-hour and outage scenarios. Revisit the Rust CLI when these captures have practical value.
-4. **All routes and public map:** ingest all subway feed groups, add supported route selection, accessibility-conscious UI, container deployment, metrics, and MTA compliance notices.
+4. **All routes and public map:** add supported route selection, accessibility-conscious UI, container deployment, metrics, and MTA compliance notices using the complete realtime feed set.
 5. **Operational status:** ingest service alerts and ship deterministic line-status cards and APIs.
 6. **Journey impact:** build the routing index, station selectors, realtime overlay, and origin-to-destination impact UI.
 7. **Local assistant:** implement the Go model adapter, deterministic fact rendering, template fallback, chat drawer, and offline evaluation suite.
@@ -147,7 +147,7 @@ Successful realtime responses include `coverage` and `sources`; each source repo
 
 ## Test Plan and Acceptance Criteria
 
-- Test timestamp skew rejection, atomic replacement, and out-of-order recovery. For partial feeds, test one-feed startup failure, stale last-known-good retention, route-specific freshness, an observed extra route with partial coverage, unobserved-route `503` until all sources load, readiness with any fresh source, structured source errors, and health/static-document handling without loading train snapshots.
+- Test timestamp skew rejection, atomic replacement, and out-of-order recovery. For partial feeds, test one-feed startup failure, stale last-known-good retention, route-specific freshness, an observed extra route with partial coverage, unobserved-route `503` until all sources load, readiness with any fresh source, structured source errors, health/static-document handling without loading train snapshots, and the exact complete feed-to-route registry with unique ownership.
 - Test omitted delay, absolute prediction, `NO_DATA`, stale vehicle observations, ambiguous partial vehicle descriptors, cancellations, skipped stops, and complete normalized stop ordering.
 - Test header-based GTFS parsing, service exceptions, daylight-saving boundaries, times beyond 24:00, bounded ZIP extraction, atomic schedule/index replacement, regular-feed fallback, MTA trip reconciliation, and replacement periods.
 - Test alert replacement, active-period boundaries, future alerts, route/stop/trip matching, plain-text extraction, and untrusted alert content.

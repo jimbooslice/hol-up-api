@@ -18,16 +18,23 @@ import (
 )
 
 const (
-	defaultAddress     = ":8080"
-	defaultACEFeedURL  = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-ace"
-	defaultNQRWFeedURL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs-nqrw"
-	pollInterval       = 30 * time.Second
-	staleAfter         = time.Minute
+	defaultAddress         = ":8080"
+	defaultNumberedFeedURL = "https://api-endpoint.mta.info/Dataservice/mtagtfsfeeds/nyct%2Fgtfs"
+	defaultACEFeedURL      = defaultNumberedFeedURL + "-ace"
+	defaultBDFMFeedURL     = defaultNumberedFeedURL + "-bdfm"
+	defaultGFeedURL        = defaultNumberedFeedURL + "-g"
+	defaultJZFeedURL       = defaultNumberedFeedURL + "-jz"
+	defaultLFeedURL        = defaultNumberedFeedURL + "-l"
+	defaultNQRWFeedURL     = defaultNumberedFeedURL + "-nqrw"
+	defaultSIFeedURL       = defaultNumberedFeedURL + "-si"
+	pollInterval           = 30 * time.Second
+	staleAfter             = time.Minute
 )
 
 type feed struct {
 	name   string
 	routes []string
+	url    string
 	loader *ingest.Loader
 	store  *realtime.Store
 }
@@ -45,19 +52,15 @@ func run(logger *slog.Logger) error {
 	defer stop()
 
 	client := &http.Client{Timeout: 10 * time.Second}
-	feeds := []feed{
-		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
-		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
-	}
-	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, env("MTA_GTFS_RT_URL", defaultACEFeedURL), "")
-	feeds[1].loader = ingest.NewLoader(client, feeds[1].store, env("MTA_GTFS_RT_NQRW_URL", defaultNQRWFeedURL), "")
-	metrics := telemetry.New(feeds[0].name, feeds[1].name)
-	go poll(ctx, logger, metrics, feeds)
-
+	feeds := configuredFeeds(client)
 	sources := make([]httpapi.Source, len(feeds))
+	names := make([]string, len(feeds))
 	for index, feed := range feeds {
 		sources[index] = httpapi.Source{Name: feed.name, Routes: feed.routes, Store: feed.store}
+		names[index] = feed.name
 	}
+	metrics := telemetry.New(names...)
+	go poll(ctx, logger, metrics, feeds)
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
@@ -83,6 +86,24 @@ func run(logger *slog.Logger) error {
 		defer cancel()
 		return server.Shutdown(shutdownContext)
 	}
+}
+
+func configuredFeeds(client *http.Client) []feed {
+	feeds := []feed{
+		{name: "ace", routes: []string{"A", "C", "E", "H"}, url: env("MTA_GTFS_RT_URL", defaultACEFeedURL)},
+		{name: "bdfm", routes: []string{"B", "D", "F", "FX", "M", "FS"}, url: env("MTA_GTFS_RT_BDFM_URL", defaultBDFMFeedURL)},
+		{name: "g", routes: []string{"G"}, url: env("MTA_GTFS_RT_G_URL", defaultGFeedURL)},
+		{name: "jz", routes: []string{"J", "Z"}, url: env("MTA_GTFS_RT_JZ_URL", defaultJZFeedURL)},
+		{name: "l", routes: []string{"L"}, url: env("MTA_GTFS_RT_L_URL", defaultLFeedURL)},
+		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, url: env("MTA_GTFS_RT_NQRW_URL", defaultNQRWFeedURL)},
+		{name: "numbered", routes: []string{"1", "2", "3", "4", "5", "6", "6X", "7", "7X", "GS"}, url: env("MTA_GTFS_RT_NUMBERED_URL", defaultNumberedFeedURL)},
+		{name: "si", routes: []string{"SI", "SS"}, url: env("MTA_GTFS_RT_SI_URL", defaultSIFeedURL)},
+	}
+	for index := range feeds {
+		feeds[index].store = realtime.NewStore()
+		feeds[index].loader = ingest.NewLoader(client, feeds[index].store, feeds[index].url, "")
+	}
+	return feeds
 }
 
 func poll(ctx context.Context, logger *slog.Logger, metrics *telemetry.Store, feeds []feed) {

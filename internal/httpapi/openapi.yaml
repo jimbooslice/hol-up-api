@@ -1,8 +1,8 @@
 openapi: 3.1.1
 info:
   title: Hol Up transit API
-  version: 1.0.0
-  description: Realtime MTA subway service from the ACE and N/Q/R/W GTFS-Realtime feeds.
+  version: 1.1.0
+  description: Realtime service from all eight feeds in MTA's Subway Realtime catalog, including Staten Island Railway.
 paths:
   /healthz:
     get:
@@ -49,7 +49,7 @@ paths:
         - name: route_id
           in: query
           required: true
-          description: A route ID returned by /api/v1/routes, such as A or W.
+          description: A route ID returned by /api/v1/routes, such as A or SI.
           schema:
             type: string
           example: W
@@ -137,7 +137,7 @@ components:
           type: array
           items:
             type: string
-          example: [A, C, E, N, Q, R, W]
+          example: ['1', '2', A, B, G, L, N, SI]
     Trains:
       type: object
       required: [as_of, freshness, coverage, sources, trains]
@@ -215,7 +215,7 @@ components:
         name:
           type: string
           description: Stable configured feed name.
-          enum: [ace, nqrw]
+          enum: [ace, bdfm, g, jz, l, nqrw, numbered, si]
         routes:
           type: array
           description: Route IDs configured as owned by this source, independent of currently active trains.
