@@ -33,6 +33,25 @@ SIR service ID observed in MTA's realtime feed and is assigned to the `si`
 source; `SI` remains the canonical static route ID. A failed refresh never
 replaces that source's last known good snapshot.
 
+`MTA_GTFS_RT_MAX_FUTURE_SKEW` limits how far a feed header timestamp may be
+ahead of local receipt time for all eight feeds. It is read once at startup
+as a Go duration (for example, `30s` or `1m250ms`); unset or empty defaults to
+`30s`, and `0` enables strict validation. Malformed or negative values stop
+startup before polling or serving. The startup log records
+`max_future_skew_seconds`.
+
+A header more than this tolerance ahead is rejected as a whole refresh. The
+exact boundary is accepted, and future arrival/departure predictions remain
+valid. Rejected refreshes are discarded; normal polling retries every 30
+seconds without rewriting timestamps, queuing payloads, clearing healthy
+data, or restarting. Retained snapshots age into `stale` after one minute;
+an initial rejection leaves that source `unavailable`. Other feeds continue
+independently, and readiness still requires any one fresh feed.
+
+The host wall clock is the reference and is expected to be synchronized.
+Existing per-feed ordering remains enforced: an accepted timestamp within
+the tolerance can temporarily block a slightly earlier update.
+
 Successful route and train responses report `coverage` as `complete`,
 `partial`, or `unavailable` and include per-source configured routes, source
 timestamp, and freshness. `/api/v1/routes` returns routes from any source that
@@ -70,8 +89,26 @@ The container build runs the Go tests before producing a non-root runtime
 image. The smoke script uses Docker or Podman, checks `/healthz`, and verifies
 JSON startup and SIGTERM shutdown events (requires curl and jq).
 
-Structured lifecycle and feed failure/recovery logs go to stdout. For local
-logs and metrics in Grafana, see [the LGTM environment](ops/lgtm/README.md).
+Structured lifecycle and feed failure/recovery logs go to stdout. Error fields
+contain safe summaries and retain only numeric upstream HTTP statuses. Unknown
+failures intentionally lose their original detail. A future timestamp produces
+a `realtime_feed_refresh_failed` WARN with a safe summary,
+`reason="future_source_timestamp"`, numeric Unix seconds in
+`rejected_source_timestamp`, local `received_at`, and
+`max_future_skew_seconds`. `source_timestamp` still describes the retained
+snapshot and is omitted when none exists. Future rejection warns once per
+outage, including one additional warning if another error opened that outage.
+Further repetitions are suppressed until a successful publication resets the
+outage and emits the existing INFO recovery event. Every rejection increments
+the feed's error counter without advancing last success, published timestamp,
+or train count; shutdown cancellation remains suppressed.
+
+For persistent rejection, compare the logged source and receipt timestamps
+and check host clock synchronization. Correct host time if it is wrong;
+otherwise await upstream recovery. If a process already holds a poisoned
+snapshot accepted by the old code, a deployment restart clears that in-memory
+state. For local logs and metrics
+in Grafana, see [the LGTM environment](ops/lgtm/README.md).
 
 ## Protobuf bindings
 

@@ -26,10 +26,10 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 	defer nqrw.Close()
 
 	aceStore, nqrwStore := realtime.NewStore(), realtime.NewStore()
-	if err := ingest.NewLoader(ace.Client(), aceStore, ace.URL, "").Load(t.Context()); err != nil {
+	if err := ingest.NewLoader(ace.Client(), aceStore, ace.URL, "", 30*time.Second, func() time.Time { return now }).Load(t.Context()); err != nil {
 		t.Fatalf("load ACE: %v", err)
 	}
-	if err := ingest.NewLoader(nqrw.Client(), nqrwStore, nqrw.URL, "").Load(t.Context()); err != nil {
+	if err := ingest.NewLoader(nqrw.Client(), nqrwStore, nqrw.URL, "", 30*time.Second, func() time.Time { return now }).Load(t.Context()); err != nil {
 		t.Fatalf("load N/Q/R/W: %v", err)
 	}
 	sources := []httpapi.Source{

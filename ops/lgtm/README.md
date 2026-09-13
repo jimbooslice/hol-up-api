@@ -94,12 +94,34 @@ sum by (feed) (rate(holup_realtime_feed_refreshes_total{outcome="error"}[5m]))
 ```
 
 JSON logs include `service="hol-up-api"`. Lifecycle events are `api_starting`,
-`api_shutdown_started`, and `api_stopped`. Each feed outage produces one
+`api_shutdown_started`, and `api_stopped`. Each feed outage normally produces one
 `realtime_feed_refresh_failed` warning, followed by one
 `realtime_feed_refresh_recovered` info event with failure count and outage
 duration. Repeated failures still increment metrics. Initial failures explicitly
 report no snapshot and omit its timestamp. Shutdown cancellation records neither
 refresh outcomes nor transitions. Feed URLs and request data are not logged.
+Error fields contain safe summaries and retain only numeric upstream HTTP
+statuses; unknown failures intentionally lose their original detail.
+
+Future feed headers beyond `MTA_GTFS_RT_MAX_FUTURE_SKEW` (Go duration,
+default `30s`, zero allowed; malformed or negative values prevent startup)
+are discarded and retried through normal 30-second polling. The startup
+event records `max_future_skew_seconds`. Their warning has
+`reason="future_source_timestamp"`, `rejected_source_timestamp` as numeric
+Unix seconds, `received_at` as local receipt time, and
+`max_future_skew_seconds`. `source_timestamp` continues to describe the
+retained snapshot. The first future rejection in an outage emits one
+additional warning if another error already opened it; further future
+warnings are suppressed until successful publication resets the outage.
+Each rejection increments the error counter but leaves last success,
+published timestamp, and train count unchanged. Retained data ages into
+`stale` normally, and initial rejection leaves that source `unavailable`.
+
+For persistent rejection, compare the logged timestamps and check host clock
+synchronization. Correct host time if wrong; otherwise await upstream
+recovery. Polling neither clears healthy snapshots nor restarts the process.
+A deployment restart clears a poisoned in-memory snapshot already accepted
+by the old code. Readiness still succeeds while any sibling feed is fresh.
 
 ## Verification
 

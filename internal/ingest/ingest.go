@@ -22,19 +22,38 @@ var (
 	ErrFeedTooLarge     = errors.New("GTFS-Realtime feed exceeds 10 MiB")
 )
 
-// Loader fetches one complete protobuf feed and atomically publishes it.
-type Loader struct {
-	client  *http.Client
-	store   *realtime.Store
-	url     string
-	routeID string
+type HTTPStatusError int
+
+func (e HTTPStatusError) Error() string {
+	return fmt.Sprintf("fetch GTFS-Realtime feed: unexpected HTTP status %d", e)
 }
 
-func NewLoader(client *http.Client, store *realtime.Store, url, routeID string) *Loader {
+// FutureTimestampError rejects a feed header beyond the local receipt tolerance.
+type FutureTimestampError struct {
+	SourceTimestamp time.Time
+	ReceivedAt      time.Time
+	MaxFutureSkew   time.Duration
+}
+
+func (e *FutureTimestampError) Error() string {
+	return "GTFS-Realtime source timestamp exceeds allowed future skew"
+}
+
+// Loader fetches one complete protobuf feed and atomically publishes it.
+type Loader struct {
+	client        *http.Client
+	store         *realtime.Store
+	url           string
+	routeID       string
+	maxFutureSkew time.Duration
+	now           func() time.Time
+}
+
+func NewLoader(client *http.Client, store *realtime.Store, url, routeID string, maxFutureSkew time.Duration, now func() time.Time) *Loader {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Loader{client: client, store: store, url: url, routeID: routeID}
+	return &Loader{client: client, store: store, url: url, routeID: routeID, maxFutureSkew: maxFutureSkew, now: now}
 }
 
 func (l *Loader) Load(ctx context.Context) error {
@@ -51,13 +70,14 @@ func (l *Loader) Load(ctx context.Context) error {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4<<10))
-		return fmt.Errorf("fetch GTFS-Realtime feed: unexpected HTTP status %d", response.StatusCode)
+		return HTTPStatusError(response.StatusCode)
 	}
 
 	body, err := io.ReadAll(io.LimitReader(response.Body, MaxFeedBytes+1))
 	if err != nil {
 		return fmt.Errorf("read GTFS-Realtime feed: %w", err)
 	}
+	receivedAt := l.now()
 	if int64(len(body)) > MaxFeedBytes {
 		return ErrFeedTooLarge
 	}
@@ -65,6 +85,9 @@ func (l *Loader) Load(ctx context.Context) error {
 	snapshot, err := Decode(body, l.routeID)
 	if err != nil {
 		return err
+	}
+	if snapshot.SourceTimestamp.After(receivedAt.Add(l.maxFutureSkew)) {
+		return &FutureTimestampError{SourceTimestamp: snapshot.SourceTimestamp, ReceivedAt: receivedAt, MaxFutureSkew: l.maxFutureSkew}
 	}
 	if err := l.store.Replace(snapshot); err != nil {
 		return fmt.Errorf("publish GTFS-Realtime feed: %w", err)

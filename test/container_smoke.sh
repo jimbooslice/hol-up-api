@@ -31,7 +31,7 @@ while [ "$attempt" -lt 20 ]; do
         "$runtime" stop --time 15 "$container" >/dev/null
         "$runtime" logs "$container" | jq -se '
           all(.[]; .service == "hol-up-api") and
-          ([.[] | select(.event == "api_starting" and .level == "INFO" and .address == ":8080" and .feed_count == 8 and .poll_interval_seconds == 30 and .stale_after_seconds == 60)] | length == 1) and
+          ([.[] | select(.event == "api_starting" and .level == "INFO" and .address == ":8080" and .feed_count == 8 and .poll_interval_seconds == 30 and .stale_after_seconds == 60 and .max_future_skew_seconds == 30)] | length == 1) and
           ([.[] | select(.event == "api_shutdown_started" and .timeout_seconds == 10)] | length == 1) and
           ([.[] | select(.event == "api_stopped" and .level == "INFO" and (has("error") | not))] | length == 1)
         ' >/dev/null
