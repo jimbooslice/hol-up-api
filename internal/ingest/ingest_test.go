@@ -565,3 +565,63 @@ func TestStopOrderWithoutSequencesAndEventPresence(t *testing.T) {
 		t.Fatal("invalid observation timestamp accepted")
 	}
 }
+
+func TestReplacementMetadataAndUnidentifiedRoundTrip(t *testing.T) {
+	header := &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0"), Timestamp: proto.Uint64(1000)}
+	proto.SetExtension(header, gtfs.E_NyctFeedHeader, &gtfs.NyctFeedHeader{NyctSubwayVersion: proto.String("1.0"), TripReplacementPeriod: []*gtfs.TripReplacementPeriod{
+		{RouteId: proto.String("A"), ReplacementPeriod: &gtfs.TimeRange{Start: proto.Uint64(0), End: proto.Uint64(2000)}},
+		{RouteId: proto.String("C"), ReplacementPeriod: &gtfs.TimeRange{End: proto.Uint64(1 << 63)}},
+		{ReplacementPeriod: &gtfs.TimeRange{Start: proto.Uint64(10)}},
+		{RouteId: proto.String("E")},
+	}})
+	identified := tripUpdateEntity("known", "trip", "A", "A01N")
+	unidentified := tripUpdateEntity("unknown", "", "A", "A01S")
+	unidentified.TripUpdate.StopTimeUpdate[0].Arrival = &gtfs.TripUpdate_StopTimeEvent{Delay: proto.Int32(0)}
+	proto.SetExtension(unidentified.TripUpdate.Trip, gtfs.E_NyctTripDescriptor, &gtfs.NyctTripDescriptor{Direction: gtfs.NyctTripDescriptor_NORTH.Enum()})
+	wire := mustMarshal(t, &gtfs.FeedMessage{Header: header, Entity: []*gtfs.FeedEntity{identified, unidentified}})
+	snapshot, err := Decode(wire, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Complete || snapshot.NYCTVersion != "1.0" || len(snapshot.Trains) != 1 || len(snapshot.UnidentifiedTrips) != 1 || len(snapshot.ReplacementPeriods) != 4 {
+		t.Fatalf("%+v", snapshot)
+	}
+	periods := snapshot.ReplacementPeriods
+	if periods[0].Start == nil || *periods[0].Start != 0 || periods[1].Start != nil || *periods[1].End != 1<<63 || periods[2].RouteID != "" || periods[2].End != nil || periods[3].Start != nil || periods[3].End != nil {
+		t.Fatalf("lost malformed metadata or presence: %+v", periods)
+	}
+	if snapshot.Trains[0].NYCTDirection != nil || snapshot.Trains[0].Direction != realtime.DirectionNorthbound || snapshot.UnidentifiedTrips[0].NYCTDirection == nil || *snapshot.UnidentifiedTrips[0].NYCTDirection != realtime.DirectionNorthbound {
+		t.Fatal("supplied direction lost/inferred")
+	}
+	filtered, err := Decode(wire, "A")
+	if err != nil || filtered.Complete {
+		t.Fatalf("filtered completeness: %+v/%v", filtered, err)
+	}
+	snapshot.SourceName = "ace"
+	snapshot.ReceivedAt = time.Unix(1001, 0)
+	store := realtime.NewStore()
+	if err := store.Replace(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	*snapshot.ReplacementPeriods[0].Start = 99
+	*snapshot.UnidentifiedTrips[0].Stops[0].Arrival.DelaySeconds = 99
+	*snapshot.UnidentifiedTrips[0].NYCTDirection = realtime.DirectionSouthbound
+	read := store.Load(time.Unix(1001, 0), time.Minute)
+	*read.ReplacementPeriods[0].End = 99
+	*read.UnidentifiedTrips[0].Stops[0].InputIndex = 99
+	again := store.Load(time.Unix(1001, 0), time.Minute)
+	if *again.ReplacementPeriods[0].Start != 0 || *again.ReplacementPeriods[0].End != 2000 || *again.UnidentifiedTrips[0].Stops[0].Arrival.DelaySeconds != 0 || *again.UnidentifiedTrips[0].Stops[0].InputIndex != 0 || *again.UnidentifiedTrips[0].NYCTDirection != realtime.DirectionNorthbound {
+		t.Fatal("nested state aliased")
+	}
+	if _, _, count := store.Status(time.Unix(1001, 0), time.Minute); count != 1 {
+		t.Fatal("unidentified record changed compact count")
+	}
+}
+
+func TestUnknownIncrementalityCannotEstablishCompleteness(t *testing.T) {
+	wire := mustMarshal(t, &gtfs.FeedMessage{Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0"), Timestamp: proto.Uint64(1000), Incrementality: gtfs.FeedHeader_Incrementality(99).Enum()}})
+	snapshot, err := Decode(wire, "")
+	if err != nil || snapshot.Complete {
+		t.Fatalf("unknown incrementality: %+v/%v", snapshot, err)
+	}
+}

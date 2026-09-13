@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,8 @@ import (
 	"hol-up-prototype/internal/httpapi"
 	"hol-up-prototype/internal/ingest"
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/schedule"
+	"hol-up-prototype/internal/scheduleingest"
 	"hol-up-prototype/internal/telemetry"
 )
 
@@ -35,9 +38,13 @@ const (
 	staleAfter             = time.Minute
 )
 
+var errInvalidLogLevel = errors.New("LOG_LEVEL must be DEBUG, INFO, WARN, or ERROR")
+
 var errInvalidMaxFutureSkew = errors.New("MTA_GTFS_RT_MAX_FUTURE_SKEW must be a non-negative Go duration")
+var errInvalidScheduleMaxAge = errors.New("SCHEDULE_MAX_AGE must be a positive Go duration")
 
 type feed struct {
+	onPublication         func(string)
 	name                  string
 	routes                []string
 	url                   string
@@ -49,7 +56,12 @@ type feed struct {
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "hol-up-api")
+	level, err := configuredLogLevel()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})).With("service", "hol-up-api")
+	if err != nil {
+		logger.Error("API stopped", "event", "api_stopped", "error", logError(err))
+		os.Exit(1)
+	}
 	if err := run(logger); err != nil {
 		logger.Error("API stopped", "event", "api_stopped", "error", logError(err))
 		os.Exit(1)
@@ -58,7 +70,14 @@ func main() {
 }
 
 func run(logger *slog.Logger) error {
+	if _, err := configuredLogLevel(); err != nil {
+		return err
+	}
 	maxFutureSkew, err := configuredMaxFutureSkew()
+	if err != nil {
+		return err
+	}
+	maxAge, err := configuredScheduleMaxAge()
 	if err != nil {
 		return err
 	}
@@ -67,6 +86,12 @@ func run(logger *slog.Logger) error {
 
 	client := &http.Client{Timeout: 10 * time.Second}
 	feeds := configuredFeeds(client, maxFutureSkew, time.Now)
+	coordinator := &reconciliationCoordinator{schedules: &schedule.Store{}, feeds: feeds, now: time.Now, logger: logger, maxScheduleAge: maxAge}
+	schedules := configuredSchedules(logger, time.Now, coordinator.schedules, maxAge)
+	schedules.OnPublication = func(reason string) { coordinator.run("schedule:" + reason) }
+	for i := range feeds {
+		feeds[i].onPublication = coordinator.run
+	}
 	sources := make([]httpapi.Source, len(feeds))
 	names := make([]string, len(feeds))
 	for index, feed := range feeds {
@@ -84,6 +109,7 @@ func run(logger *slog.Logger) error {
 	}
 	logger.Info("API starting", "event", "api_starting", "address", server.Addr, "feed_count", len(feeds), "poll_interval_seconds", pollInterval.Seconds(), "stale_after_seconds", staleAfter.Seconds(), "max_future_skew_seconds", maxFutureSkew.Seconds())
 	go poll(ctx, logger, metrics, feeds)
+	go schedules.Run(ctx)
 	serverErrors := make(chan error, 1)
 	go func() {
 		serverErrors <- server.ListenAndServe()
@@ -101,6 +127,37 @@ func run(logger *slog.Logger) error {
 		defer cancel()
 		return server.Shutdown(shutdownContext)
 	}
+}
+
+func configuredLogLevel() (slog.Level, error) {
+	switch strings.ToUpper(os.Getenv("LOG_LEVEL")) {
+	case "", "INFO":
+		return slog.LevelInfo, nil
+	case "DEBUG":
+		return slog.LevelDebug, nil
+	case "WARN":
+		return slog.LevelWarn, nil
+	case "ERROR":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, errInvalidLogLevel
+	}
+}
+
+func configuredScheduleMaxAge() (time.Duration, error) {
+	maxAge, err := time.ParseDuration(env("SCHEDULE_MAX_AGE", "24h"))
+	if err != nil || maxAge <= 0 {
+		return 0, errInvalidScheduleMaxAge
+	}
+	return maxAge, nil
+}
+
+func configuredSchedules(logger *slog.Logger, now func() time.Time, store *schedule.Store, maxAge time.Duration) *scheduleingest.Loader {
+	return scheduleingest.NewLoader(nil, store, scheduleingest.FileCache{Dir: env("SCHEDULE_CACHE_DIR", scheduleingest.DefaultCacheDir)}, scheduleingest.Config{
+		SupplementedURL: env("MTA_GTFS_SUPPLEMENTED_URL", scheduleingest.SupplementedURL),
+		RegularURL:      env("MTA_GTFS_REGULAR_URL", scheduleingest.RegularURL),
+		MaxAge:          maxAge,
+	}, logger, now)
 }
 
 func configuredMaxFutureSkew() (time.Duration, error) {
@@ -153,6 +210,9 @@ func refresh(ctx context.Context, logger *slog.Logger, metrics *telemetry.Store,
 			defer wait.Done()
 			started := time.Now()
 			err := source.loader.Load(ctx)
+			if err == nil && source.onPublication != nil {
+				source.onPublication("realtime:" + source.name)
+			}
 			if ctx.Err() != nil {
 				return
 			}
@@ -206,6 +266,12 @@ func logError(err error) string {
 	}
 	if errors.Is(err, errInvalidMaxFutureSkew) {
 		return errInvalidMaxFutureSkew.Error()
+	}
+	if errors.Is(err, errInvalidLogLevel) {
+		return errInvalidLogLevel.Error()
+	}
+	if errors.Is(err, errInvalidScheduleMaxAge) {
+		return errInvalidScheduleMaxAge.Error()
 	}
 	var futureError *ingest.FutureTimestampError
 	if errors.As(err, &futureError) {

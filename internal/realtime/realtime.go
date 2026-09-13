@@ -73,6 +73,7 @@ type StopEvent struct {
 
 type StopPrediction struct {
 	StopID       string
+	InputIndex   *uint32 // Original feed order, retained when compact normalization sorts stops.
 	Sequence     *uint32
 	Relationship StopRelationship
 	Arrival      *StopEvent
@@ -90,6 +91,7 @@ type Train struct {
 	ScheduleRelationship   string
 	Stops                  []StopPrediction
 	TripDelaySeconds       *int32
+	NYCTDirection          *Direction // Supplied extension value, never inferred from a stop.
 	DirectionID            *uint32
 	Direction              Direction
 	NextStopID             string
@@ -152,14 +154,28 @@ func (t Train) Prediction(stop *StopPrediction) (time.Time, *int32) {
 	return event.Time, delay
 }
 
-// Snapshot is one complete replacement set from a realtime source.
+type ReplacementPeriod struct {
+	RouteID    string
+	Start, End *uint64
+}
+
+func (p ReplacementPeriod) Clone() ReplacementPeriod {
+	p.Start, p.End = clonePointer(p.Start), clonePointer(p.End)
+	return p
+}
+
+// Snapshot retains completeness separately from its compact API records.
 type Snapshot struct {
-	SourceTimestamp time.Time
-	SourceName      string
-	ReceivedAt      time.Time
-	Freshness       Freshness
-	Trains          []Train
-	activeTrains    int
+	SourceTimestamp    time.Time
+	SourceName         string
+	ReceivedAt         time.Time
+	Freshness          Freshness
+	Trains             []Train
+	UnidentifiedTrips  []Train
+	ReplacementPeriods []ReplacementPeriod
+	NYCTVersion        string
+	Complete           bool // Unfiltered FULL_DATASET; false cannot establish absence or uniqueness.
+	activeTrains       int
 }
 
 // Store atomically publishes complete snapshots. Invalid replacements leave
@@ -178,7 +194,7 @@ func (s *Store) Replace(next Snapshot) error {
 		return ErrMissingSourceTimestamp
 	}
 
-	next = cloneSnapshot(next)
+	next = next.Clone()
 	next.activeTrains = 0
 	for index := range next.Trains {
 		if next.Trains[index].VehicleMatch == "" {
@@ -221,7 +237,7 @@ func (s *Store) Load(now time.Time, staleAfter time.Duration) Snapshot {
 		return Snapshot{Freshness: FreshnessUnavailable}
 	}
 
-	result := cloneSnapshot(*current)
+	result := current.Clone()
 	result.Freshness = FreshnessAt(result.SourceTimestamp, now, staleAfter)
 	for index := range result.Trains {
 		result.Trains[index].Freshness = FreshnessAt(result.Trains[index].SourceTimestamp, now, staleAfter)
@@ -267,23 +283,40 @@ func FreshnessAt(sourceTimestamp, now time.Time, staleAfter time.Duration) Fresh
 	return FreshnessFresh
 }
 
-func cloneSnapshot(snapshot Snapshot) Snapshot {
+// Clone returns an independent copy, including every optional nested value.
+func (snapshot Snapshot) Clone() Snapshot {
 	result := snapshot
-	result.Trains = append([]Train(nil), snapshot.Trains...)
-	for index := range result.Trains {
-		train := &result.Trains[index]
-		train.DirectionID = clonePointer(train.DirectionID)
-		train.TripDelaySeconds = clonePointer(train.TripDelaySeconds)
-		train.PredictionDelaySeconds = clonePointer(train.PredictionDelaySeconds)
-		train.Stops = append([]StopPrediction(nil), train.Stops...)
-		for i := range train.Stops {
-			stop := &train.Stops[i]
-			stop.Sequence = clonePointer(stop.Sequence)
-			stop.Arrival = cloneEvent(stop.Arrival)
-			stop.Departure = cloneEvent(stop.Departure)
-		}
+	result.Trains = cloneTrains(snapshot.Trains)
+	result.UnidentifiedTrips = cloneTrains(snapshot.UnidentifiedTrips)
+	result.ReplacementPeriods = append([]ReplacementPeriod(nil), snapshot.ReplacementPeriods...)
+	for i := range result.ReplacementPeriods {
+		result.ReplacementPeriods[i] = result.ReplacementPeriods[i].Clone()
 	}
 	return result
+}
+
+func cloneTrains(trains []Train) []Train {
+	result := append([]Train(nil), trains...)
+	for i := range result {
+		result[i] = result[i].Clone()
+	}
+	return result
+}
+
+func (train Train) Clone() Train {
+	train.DirectionID = clonePointer(train.DirectionID)
+	train.NYCTDirection = clonePointer(train.NYCTDirection)
+	train.TripDelaySeconds = clonePointer(train.TripDelaySeconds)
+	train.PredictionDelaySeconds = clonePointer(train.PredictionDelaySeconds)
+	train.Stops = append([]StopPrediction(nil), train.Stops...)
+	for i := range train.Stops {
+		stop := &train.Stops[i]
+		stop.Sequence = clonePointer(stop.Sequence)
+		stop.InputIndex = clonePointer(stop.InputIndex)
+		stop.Arrival = cloneEvent(stop.Arrival)
+		stop.Departure = cloneEvent(stop.Departure)
+	}
+	return train
 }
 
 func clonePointer[T any](value *T) *T {

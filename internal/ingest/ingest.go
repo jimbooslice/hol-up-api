@@ -135,15 +135,27 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 		}
 	}
 
-	trains := make([]realtime.Train, 0, len(feed.GetEntity())/2)
+	snapshot := realtime.Snapshot{SourceTimestamp: sourceTimestamp, Complete: routeID == "" && feed.GetHeader().GetIncrementality() == gtfs.FeedHeader_FULL_DATASET}
+	if proto.HasExtension(feed.Header, gtfs.E_NyctFeedHeader) {
+		if header, ok := proto.GetExtension(feed.Header, gtfs.E_NyctFeedHeader).(*gtfs.NyctFeedHeader); ok {
+			snapshot.NYCTVersion = header.GetNyctSubwayVersion()
+			for _, period := range header.GetTripReplacementPeriod() {
+				value := realtime.ReplacementPeriod{RouteID: period.GetRouteId()}
+				if bounds := period.GetReplacementPeriod(); bounds != nil {
+					value.Start, value.End = bounds.Start, bounds.End
+				}
+				snapshot.ReplacementPeriods = append(snapshot.ReplacementPeriods, value)
+			}
+		}
+	}
 	for _, entity := range feed.GetEntity() {
 		update := entity.GetTripUpdate()
-		if entity.GetIsDeleted() || update == nil || update.GetTrip() == nil {
+		if entity.GetIsDeleted() || update == nil {
 			continue
 		}
 		descriptor := update.GetTrip()
-		if descriptor.GetTripId() == "" {
-			continue
+		if descriptor == nil {
+			descriptor = &gtfs.TripDescriptor{}
 		}
 		if routeID != "" && descriptor.GetRouteId() != routeID {
 			continue
@@ -173,6 +185,12 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 			VehicleTimestamp:     vehicleTimestamp,
 			VehicleMatch:         match,
 		}
+		if proto.HasExtension(descriptor, gtfs.E_NyctTripDescriptor) {
+			if ext, ok := proto.GetExtension(descriptor, gtfs.E_NyctTripDescriptor).(*gtfs.NyctTripDescriptor); ok && ext.Direction != nil {
+				supplied := direction(descriptor, "")
+				train.NYCTDirection = &supplied
+			}
+		}
 		if nextStop := train.NextServedStop(); nextStop != nil {
 			train.NextStopID = nextStop.StopID
 			train.Direction = direction(descriptor, nextStop.StopID)
@@ -186,10 +204,14 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 		if train.Canceled() {
 			train.MovementState = realtime.MovementStateUnknown
 		}
-		trains = append(trains, train)
+		if train.TripID == "" {
+			snapshot.UnidentifiedTrips = append(snapshot.UnidentifiedTrips, train)
+		} else {
+			snapshot.Trains = append(snapshot.Trains, train)
+		}
 	}
 
-	return realtime.Snapshot{SourceTimestamp: sourceTimestamp, Trains: trains}, nil
+	return snapshot, nil
 }
 
 func matchingVehicle(trip *gtfs.TripDescriptor, candidates []*gtfs.FeedEntity, trips []*gtfs.TripDescriptor) (*gtfs.FeedEntity, realtime.VehicleMatch) {
@@ -237,13 +259,13 @@ func differentWhenPresent(left, right string) bool {
 func stopPredictions(updates []*gtfs.TripUpdate_StopTimeUpdate) []realtime.StopPrediction {
 	stops := make([]realtime.StopPrediction, 0, len(updates))
 	allSequences := true
-	for _, update := range updates {
+	for index, update := range updates {
 		if update == nil {
 			continue
 		}
 		allSequences = allSequences && update.StopSequence != nil
 		stops = append(stops, realtime.StopPrediction{
-			StopID: update.GetStopId(), Sequence: update.StopSequence,
+			StopID: update.GetStopId(), Sequence: update.StopSequence, InputIndex: proto.Uint32(uint32(index)),
 			Relationship: realtime.StopRelationship(update.GetScheduleRelationship().String()),
 			Arrival:      stopEvent(update.GetArrival()), Departure: stopEvent(update.GetDeparture()),
 		})
