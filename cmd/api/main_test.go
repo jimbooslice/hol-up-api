@@ -3,10 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -273,4 +276,126 @@ func apiRequest(handler http.Handler, target string) *httptest.ResponseRecorder 
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, target, nil))
 	return recorder
+}
+
+func TestRefreshTransitionLogs(t *testing.T) {
+	base := time.Date(2026, time.September, 2, 17, 0, 0, 0, time.UTC)
+	good := feedBytes(t, base, "A", "private-trip")
+	server := feedServer(t, good, []byte("bad"), []byte("bad"), good, good)
+	defer server.Close()
+	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "")
+	metrics := telemetry.New("ace")
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil)).With("service", "hol-up-api")
+	for range 5 {
+		refresh(context.Background(), logger, metrics, feeds)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("want two transitions: %s", &logs)
+	}
+	for i, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal([]byte(line), &record); err != nil {
+			t.Fatal(err)
+		}
+		wantEvent, wantLevel := "realtime_feed_refresh_failed", "WARN"
+		if i == 1 {
+			wantEvent, wantLevel = "realtime_feed_refresh_recovered", "INFO"
+		}
+		for key, want := range map[string]any{"event": wantEvent, "level": wantLevel, "feed": "ace", "service": "hol-up-api", "train_count": float64(1), "source_timestamp": base.Format(time.RFC3339)} {
+			if record[key] != want {
+				t.Errorf("%s = %v, want %v", key, record[key], want)
+			}
+		}
+		if duration, ok := record["duration_ms"].(float64); !ok || duration < 0 {
+			t.Errorf("invalid duration: %v", record)
+		}
+		if i == 0 && record["snapshot_available"] != true {
+			t.Errorf("missing snapshot: %v", record)
+		}
+		if i == 1 {
+			if record["failed_refreshes"] != float64(2) {
+				t.Errorf("failure count: %v", record)
+			}
+			if duration, ok := record["outage_duration_ms"].(float64); !ok || duration < record["duration_ms"].(float64) {
+				t.Errorf("invalid outage duration: %v", record)
+			}
+		}
+	}
+	if feeds[0].failedRefreshes != 0 || !feeds[0].failureStarted.IsZero() {
+		t.Fatal("outage not cleared")
+	}
+	if got := metrics.Snapshot()[0]; got.RefreshErrors != 2 || got.RefreshSuccesses != 3 {
+		t.Fatalf("metrics: %+v", got)
+	}
+	if strings.Contains(logs.String(), "private-trip") {
+		t.Fatal("trip leaked")
+	}
+}
+
+func TestRefreshInitialFailureAndCancellation(t *testing.T) {
+	server := feedServer(t, []byte("bad"))
+	defer server.Close()
+	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "")
+	metrics := telemetry.New("ace")
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&logs, nil))
+	refresh(context.Background(), logger, metrics, feeds)
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatal(err)
+	}
+	if record["snapshot_available"] != false || record["train_count"] != float64(0) {
+		t.Fatalf("false snapshot claim: %v", record)
+	}
+	if _, exists := record["source_timestamp"]; exists {
+		t.Fatal("timestamp without snapshot")
+	}
+	beforeLogs, beforeMetrics := logs.String(), metrics.Snapshot()
+	beforeCount, beforeStarted := feeds[0].failedRefreshes, feeds[0].failureStarted
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	requested := make(chan struct{})
+	blocked := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, request *http.Request) {
+		close(requested)
+		<-request.Context().Done()
+	}))
+	defer blocked.Close()
+	feeds[0].loader = ingest.NewLoader(blocked.Client(), feeds[0].store, blocked.URL, "")
+	done := make(chan struct{})
+	go func() {
+		refresh(ctx, logger, metrics, feeds)
+		close(done)
+	}()
+	<-requested
+	cancel()
+	<-done
+	if logs.String() != beforeLogs || !reflect.DeepEqual(metrics.Snapshot(), beforeMetrics) || feeds[0].failedRefreshes != beforeCount || feeds[0].failureStarted != beforeStarted {
+		t.Fatal("cancellation changed observability state")
+	}
+}
+
+func TestRefreshSanitizesURLError(t *testing.T) {
+	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
+	client := &http.Client{Transport: failingTransport{}}
+	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, "https://user:password@example.test/feed?token=secret", "")
+	var logs bytes.Buffer
+	refresh(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)), telemetry.New("ace"), feeds)
+	for _, secret := range []string{"user", "password", "example.test", "token", "secret", "/feed"} {
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("log contains %q: %s", secret, &logs)
+		}
+	}
+	if !strings.Contains(logs.String(), "network unavailable") {
+		t.Fatal("underlying cause missing")
+	}
+}
+
+type failingTransport struct{}
+
+func (failingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("network unavailable")
 }

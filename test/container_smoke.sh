@@ -23,11 +23,19 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 "$runtime" build -f Containerfile -t "$image" .
-"$runtime" run -d --name "$container" -p "127.0.0.1:$port:8080" "$image" >/dev/null
+"$runtime" run -d --stop-signal SIGTERM --name "$container" -p "127.0.0.1:$port:8080" "$image" >/dev/null
 
 attempt=0
 while [ "$attempt" -lt 20 ]; do
     if curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null; then
+        "$runtime" stop --time 15 "$container" >/dev/null
+        "$runtime" logs "$container" | jq -se '
+          all(.[]; .service == "hol-up-api") and
+          ([.[] | select(.event == "api_starting" and .level == "INFO" and .address == ":8080" and .feed_count == 8 and .poll_interval_seconds == 30 and .stale_after_seconds == 60)] | length == 1) and
+          ([.[] | select(.event == "api_shutdown_started" and .timeout_seconds == 10)] | length == 1) and
+          ([.[] | select(.event == "api_stopped" and .level == "INFO" and (has("error") | not))] | length == 1)
+        ' >/dev/null
+        test "$("$runtime" inspect --format '{{.State.ExitCode}}' "$container")" = 0
         exit 0
     fi
     attempt=$((attempt + 1))

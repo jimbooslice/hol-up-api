@@ -1,0 +1,60 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: Containerfile
+    labels:
+      holup.logs: "true"
+    ports:
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/healthz']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+  lgtm:
+    image: docker.io/grafana/otel-lgtm:0.30.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      PROMETHEUS_EXTRA_ARGS: --storage.tsdb.retention.time=7d
+      LOKI_EXTRA_ARGS: -store.retention=168h -compactor.retention-enabled=true -compactor.delete-request-store=filesystem
+    volumes:
+      - lgtm-data:/data
+      - ./prometheus.yaml:/otel-lgtm/prometheus.yaml:ro,Z
+    ports:
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          curl -fsS http://127.0.0.1:3000/api/health &&
+          curl -fsS http://127.0.0.1:3100/ready &&
+          curl -fsS http://127.0.0.1:9090/-/ready &&
+          curl -fsS http://127.0.0.1:3200/ready &&
+          curl -fsS http://127.0.0.1:4040/ready &&
+          curl -fsS http://127.0.0.1:13133/ready
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+  alloy:
+    image: docker.io/grafana/alloy:v1.19.2
+    command: [run, --server.http.listen-addr=0.0.0.0:12345, --storage.path=/var/lib/alloy/data, /etc/alloy/config.alloy]
+    environment:
+      COMPOSE_PROJECT_NAME: ${COMPOSE_PROJECT_NAME:-holup-lgtm}
+    # Socket access grants host control, even with a read-only bind mount.
+    security_opt:
+      - label=disable
+    volumes:
+      - ${CONTAINER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock:ro
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - alloy-data:/var/lib/alloy/data
+    ports:
+      - "127.0.0.1:${ALLOY_PORT:-12345}:12345"
+volumes:
+  lgtm-data:
+  alloy-data:
+name: ${COMPOSE_PROJECT_NAME:-holup-lgtm}

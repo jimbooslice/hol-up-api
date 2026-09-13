@@ -67,10 +67,11 @@ go vet ./...
 ```
 
 The container build runs the Go tests before producing a non-root runtime
-image. The smoke script uses Docker or Podman and checks `/healthz`.
+image. The smoke script uses Docker or Podman, checks `/healthz`, and verifies
+JSON startup and SIGTERM shutdown events (requires curl and jq).
 
-Failure/recovery logging improvements and local Grafana/Loki containers are
-intentionally deferred to the next delivery phase.
+Structured lifecycle and feed failure/recovery logs go to stdout. For local
+logs and metrics in Grafana, see [the LGTM environment](ops/lgtm/README.md).
 
 ## Protobuf bindings
 

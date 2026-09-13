@@ -135,7 +135,7 @@ Successful realtime responses include `coverage` and `sources`; each source repo
 
 ## Delivery Sequence
 
-1. **Realtime correctness:** add timestamp-skew validation, optional prediction semantics, observation freshness, unambiguous matching, partial-feed coverage, and low-cost health endpoints. Partial-feed API behavior and all eight realtime feed groups are implemented; failure/recovery logging improvements and local Grafana/Loki containers follow in the next phase.
+1. **Realtime correctness:** add timestamp-skew validation, optional prediction semantics, observation freshness, unambiguous matching, partial-feed coverage, and low-cost health endpoints. Partial-feed API behavior and all eight realtime feed groups are implemented; structured lifecycle/failure/recovery logging and the local [Grafana LGTM environment](ops/lgtm/README.md) are implemented. Application tracing/profiling, alerts, and custom dashboards remain deferred.
 2. **Schedule projection:** ingest and atomically publish supplemented/regular schedules and routing indexes; implement MTA reconciliation, replacement periods, A-line station/shape projection, and provenance.
 3. **Capture and replay:** record bounded raw snapshots through `SnapshotStore`, add a controllable clock, and replay rush-hour and outage scenarios. Revisit the Rust CLI when these captures have practical value.
 4. **All routes and public map:** add supported route selection, accessibility-conscious UI, container deployment, metrics, and MTA compliance notices using the complete realtime feed set.

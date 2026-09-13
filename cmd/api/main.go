@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"sync"
@@ -32,19 +33,22 @@ const (
 )
 
 type feed struct {
-	name   string
-	routes []string
-	url    string
-	loader *ingest.Loader
-	store  *realtime.Store
+	name            string
+	routes          []string
+	url             string
+	loader          *ingest.Loader
+	store           *realtime.Store
+	failureStarted  time.Time
+	failedRefreshes uint64
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil)).With("service", "hol-up-api")
 	if err := run(logger); err != nil {
-		logger.Error("API stopped", "error", err)
+		logger.Error("API stopped", "event", "api_stopped", "error", logError(err))
 		os.Exit(1)
 	}
+	logger.Info("API stopped", "event", "api_stopped")
 }
 
 func run(logger *slog.Logger) error {
@@ -60,7 +64,6 @@ func run(logger *slog.Logger) error {
 		names[index] = feed.name
 	}
 	metrics := telemetry.New(names...)
-	go poll(ctx, logger, metrics, feeds)
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
@@ -69,9 +72,10 @@ func run(logger *slog.Logger) error {
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
+	logger.Info("API starting", "event", "api_starting", "address", server.Addr, "feed_count", len(feeds), "poll_interval_seconds", pollInterval.Seconds(), "stale_after_seconds", staleAfter.Seconds())
+	go poll(ctx, logger, metrics, feeds)
 	serverErrors := make(chan error, 1)
 	go func() {
-		logger.Info("API listening", "address", server.Addr)
 		serverErrors <- server.ListenAndServe()
 	}()
 
@@ -82,6 +86,7 @@ func run(logger *slog.Logger) error {
 		}
 		return err
 	case <-ctx.Done():
+		logger.Info("API shutdown started", "event", "api_shutdown_started", "timeout_seconds", 10)
 		shutdownContext, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		return server.Shutdown(shutdownContext)
@@ -123,16 +128,34 @@ func poll(ctx context.Context, logger *slog.Logger, metrics *telemetry.Store, fe
 
 func refresh(ctx context.Context, logger *slog.Logger, metrics *telemetry.Store, feeds []feed) {
 	var wait sync.WaitGroup
-	for _, source := range feeds {
+	for index := range feeds {
+		source := &feeds[index]
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
 			started := time.Now()
 			err := source.loader.Load(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			completed := time.Now()
+			duration := completed.Sub(started)
 			sourceTimestamp, _, trainCount := source.store.Status(time.Time{}, 0)
-			metrics.Record(source.name, err == nil, time.Since(started), time.Now(), sourceTimestamp, trainCount)
-			if err != nil && !errors.Is(err, context.Canceled) {
-				logger.Warn("realtime feed refresh failed; retaining last known good snapshot", "feed", source.name, "error", err)
+			metrics.Record(source.name, err == nil, duration, completed, sourceTimestamp, trainCount)
+			if err != nil {
+				source.failedRefreshes++
+				if source.failedRefreshes == 1 {
+					source.failureStarted = started
+					fields := []any{"event", "realtime_feed_refresh_failed", "feed", source.name, "error", logError(err), "duration_ms", duration.Milliseconds(), "snapshot_available", !sourceTimestamp.IsZero(), "train_count", trainCount}
+					if !sourceTimestamp.IsZero() {
+						fields = append(fields, "source_timestamp", sourceTimestamp)
+					}
+					logger.Warn("Realtime feed refresh failed", fields...)
+				}
+			} else if source.failedRefreshes > 0 {
+				logger.Info("Realtime feed refresh recovered", "event", "realtime_feed_refresh_recovered", "feed", source.name, "failed_refreshes", source.failedRefreshes, "outage_duration_ms", completed.Sub(source.failureStarted).Milliseconds(), "duration_ms", duration.Milliseconds(), "source_timestamp", sourceTimestamp, "train_count", trainCount)
+				source.failedRefreshes = 0
+				source.failureStarted = time.Time{}
 			}
 		}()
 	}
@@ -144,4 +167,13 @@ func env(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+// Strip request URLs (including credentials and query strings) at the logging boundary.
+func logError(err error) string {
+	var requestError *url.Error
+	for errors.As(err, &requestError) {
+		err = requestError.Err
+	}
+	return err.Error()
 }
