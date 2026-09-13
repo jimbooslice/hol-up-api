@@ -83,14 +83,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		states := h.loadSources(h.sourcesForRoute(routeID), now, true)
 		asOf, freshness, coverage := summarize(states, now, h.staleAfter)
 		matching := make([]realtime.Train, 0)
+		observedRoute := false
 		for _, state := range states {
 			for _, train := range state.snapshot.Trains {
 				if train.RouteID == routeID {
-					matching = append(matching, train)
+					observedRoute = true
+					if train.Active() {
+						matching = append(matching, train)
+					}
 				}
 			}
 		}
-		if coverage == CoverageUnavailable || (coverage == CoveragePartial && len(matching) == 0) {
+		if coverage == CoverageUnavailable || (coverage == CoveragePartial && !observedRoute) {
 			writeJSON(w, http.StatusServiceUnavailable, sourceErrorResponse("realtime source for route is unavailable", coverage, states))
 			return
 		}
@@ -190,16 +194,25 @@ type trainResponse struct {
 	RouteID                string                 `json:"route_id"`
 	TripID                 string                 `json:"trip_id"`
 	ServiceDate            string                 `json:"service_date"`
+	StartTime              string                 `json:"start_time"`
 	DirectionID            *uint32                `json:"direction_id"`
 	Direction              realtime.Direction     `json:"direction"`
 	NextStopID             string                 `json:"next_stop_id"`
 	NextStopSequence       uint32                 `json:"next_stop_sequence"`
 	PredictedAt            *string                `json:"predicted_at"`
-	PredictionDelaySeconds int32                  `json:"prediction_delay_seconds"`
+	PredictionDelaySeconds *int32                 `json:"prediction_delay_seconds"`
 	PositionBasis          realtime.PositionBasis `json:"position_basis"`
 	MovementState          realtime.MovementState `json:"movement_state"`
 	Freshness              realtime.Freshness     `json:"freshness"`
 	SourceTimestamp        *string                `json:"source_timestamp"`
+	SourceName             string                 `json:"source_name"`
+	ReceivedAt             *string                `json:"received_at"`
+	TripUpdateTimestamp    *string                `json:"trip_update_timestamp"`
+	TripUpdateFreshness    realtime.Freshness     `json:"trip_update_freshness"`
+	VehicleEntityID        string                 `json:"vehicle_entity_id"`
+	VehicleTimestamp       *string                `json:"vehicle_timestamp"`
+	VehicleFreshness       realtime.Freshness     `json:"vehicle_freshness"`
+	VehicleMatch           realtime.VehicleMatch  `json:"vehicle_match"`
 }
 
 func trainDTO(train realtime.Train) trainResponse {
@@ -208,6 +221,7 @@ func trainDTO(train realtime.Train) trainResponse {
 		RouteID:                train.RouteID,
 		TripID:                 train.TripID,
 		ServiceDate:            train.ServiceDate,
+		StartTime:              train.StartTime,
 		DirectionID:            train.DirectionID,
 		Direction:              train.Direction,
 		NextStopID:             train.NextStopID,
@@ -218,6 +232,14 @@ func trainDTO(train realtime.Train) trainResponse {
 		MovementState:          train.MovementState,
 		Freshness:              train.Freshness,
 		SourceTimestamp:        timestamp(train.SourceTimestamp),
+		SourceName:             train.SourceName,
+		ReceivedAt:             timestamp(train.ReceivedAt),
+		TripUpdateTimestamp:    timestamp(train.TripUpdateTimestamp),
+		TripUpdateFreshness:    train.TripUpdateFreshness,
+		VehicleEntityID:        train.VehicleEntityID,
+		VehicleTimestamp:       timestamp(train.VehicleTimestamp),
+		VehicleFreshness:       train.VehicleFreshness,
+		VehicleMatch:           train.VehicleMatch,
 	}
 }
 
@@ -247,7 +269,6 @@ func (h *Handler) loadSources(sources []Source, now time.Time, includeTrains boo
 		}
 		if includeTrains {
 			states[index].snapshot = source.Store.Load(now, h.staleAfter)
-			states[index].trains = len(states[index].snapshot.Trains)
 			continue
 		}
 		states[index].snapshot.SourceTimestamp, states[index].snapshot.Freshness, states[index].trains = source.Store.Status(now, h.staleAfter)

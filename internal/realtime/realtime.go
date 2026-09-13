@@ -46,30 +46,120 @@ const (
 	FreshnessUnavailable Freshness = "unavailable"
 )
 
-// Train is a normalized GTFS-RT trip instance. PositionBasis makes clear
-// whether its prediction came from realtime data or schedule fallback.
+type StopRelationship string
+
+const (
+	StopScheduled StopRelationship = "SCHEDULED"
+	StopSkipped   StopRelationship = "SKIPPED"
+	StopNoData    StopRelationship = "NO_DATA"
+)
+
+type VehicleMatch string
+
+const (
+	VehicleMatched   VehicleMatch = "matched"
+	VehicleUnmatched VehicleMatch = "unmatched"
+	VehicleAmbiguous VehicleMatch = "ambiguous"
+)
+
+// StopEvent retains presence independently for arrival and departure. Zero
+// time means omitted; an explicit Unix epoch is a nonzero time.Time.
+type StopEvent struct {
+	Time          time.Time
+	DelaySeconds  *int32
+	Uncertainty   *int32
+	ScheduledTime time.Time
+}
+
+type StopPrediction struct {
+	StopID       string
+	Sequence     *uint32
+	Relationship StopRelationship
+	Arrival      *StopEvent
+	Departure    *StopEvent
+}
+
+// Train retains a complete trip update, including canceled trips and stops
+// without predictions. Compact next-stop fields are derived from Stops.
 type Train struct {
 	EntityID               string
 	RouteID                string
 	TripID                 string
 	ServiceDate            string
+	StartTime              string
+	ScheduleRelationship   string
+	Stops                  []StopPrediction
+	TripDelaySeconds       *int32
 	DirectionID            *uint32
 	Direction              Direction
 	NextStopID             string
 	NextStopSequence       uint32
 	PredictedAt            time.Time
-	PredictionDelaySeconds int32
+	PredictionDelaySeconds *int32
 	PositionBasis          PositionBasis
 	MovementState          MovementState
 	Freshness              Freshness
 	SourceTimestamp        time.Time
+	SourceName             string
+	ReceivedAt             time.Time
+	TripUpdateTimestamp    time.Time
+	TripUpdateFreshness    Freshness
+	VehicleEntityID        string
+	VehicleTimestamp       time.Time
+	VehicleFreshness       Freshness
+	VehicleMatch           VehicleMatch
+}
+
+func (t Train) Canceled() bool {
+	return t.ScheduleRelationship == "CANCELED" || t.ScheduleRelationship == "DELETED"
+}
+
+// Active trains need an identified next served stop for the compact API.
+// Sequence-only updates remain retained until schedule reconciliation exists.
+func (t Train) Active() bool {
+	return !t.Canceled() && t.RouteID != "" && t.NextStopID != ""
+}
+
+func (t Train) NextServedStop() *StopPrediction {
+	if t.Canceled() {
+		return nil
+	}
+	for i := range t.Stops {
+		if t.Stops[i].Relationship != StopSkipped {
+			return &t.Stops[i]
+		}
+	}
+	return nil
+}
+
+// Prediction selects an absolute arrival, then an absolute departure, then
+// a delay-only event. NO_DATA must not inherit a trip-level delay.
+func (t Train) Prediction(stop *StopPrediction) (time.Time, *int32) {
+	if stop == nil || stop.Relationship == StopNoData || stop.Relationship == StopSkipped || t.Canceled() {
+		return time.Time{}, nil
+	}
+	event := stop.Arrival
+	if event == nil || (event.Time.IsZero() && (event.DelaySeconds == nil || (stop.Departure != nil && !stop.Departure.Time.IsZero()))) {
+		event = stop.Departure
+	}
+	delay := t.TripDelaySeconds
+	if event == nil {
+		return time.Time{}, delay
+	}
+	if event.DelaySeconds != nil {
+		delay = event.DelaySeconds
+	}
+	return event.Time, delay
 }
 
 // Snapshot is one complete replacement set from a realtime source.
 type Snapshot struct {
 	SourceTimestamp time.Time
+	SourceName      string
+	ReceivedAt      time.Time
 	Freshness       Freshness
 	Trains          []Train
+	activeTrains    int
 }
 
 // Store atomically publishes complete snapshots. Invalid replacements leave
@@ -89,7 +179,16 @@ func (s *Store) Replace(next Snapshot) error {
 	}
 
 	next = cloneSnapshot(next)
+	next.activeTrains = 0
 	for index := range next.Trains {
+		if next.Trains[index].VehicleMatch == "" {
+			next.Trains[index].VehicleMatch = VehicleUnmatched
+		}
+		if next.Trains[index].Active() {
+			next.activeTrains++
+		}
+		next.Trains[index].SourceName = next.SourceName
+		next.Trains[index].ReceivedAt = next.ReceivedAt
 		if next.Trains[index].SourceTimestamp.IsZero() {
 			next.Trains[index].SourceTimestamp = next.SourceTimestamp
 		}
@@ -126,8 +225,10 @@ func (s *Store) Load(now time.Time, staleAfter time.Duration) Snapshot {
 	result.Freshness = FreshnessAt(result.SourceTimestamp, now, staleAfter)
 	for index := range result.Trains {
 		result.Trains[index].Freshness = FreshnessAt(result.Trains[index].SourceTimestamp, now, staleAfter)
+		result.Trains[index].TripUpdateFreshness = observationFreshness(result.Trains[index].TripUpdateTimestamp, result.Trains[index].Freshness, now, staleAfter)
+		result.Trains[index].VehicleFreshness = observationFreshness(result.Trains[index].VehicleTimestamp, result.Trains[index].Freshness, now, staleAfter)
 		// A stale stop observation cannot describe the train's current movement.
-		if result.Trains[index].Freshness != FreshnessFresh {
+		if result.Trains[index].VehicleFreshness != FreshnessFresh || result.Trains[index].Canceled() {
 			result.Trains[index].MovementState = MovementStateUnknown
 		}
 	}
@@ -140,7 +241,18 @@ func (s *Store) Status(now time.Time, staleAfter time.Duration) (time.Time, Fres
 	if current == nil {
 		return time.Time{}, FreshnessUnavailable, 0
 	}
-	return current.SourceTimestamp, FreshnessAt(current.SourceTimestamp, now, staleAfter), len(current.Trains)
+	return current.SourceTimestamp, FreshnessAt(current.SourceTimestamp, now, staleAfter), current.activeTrains
+}
+
+func observationFreshness(observedAt time.Time, feedFreshness Freshness, now time.Time, staleAfter time.Duration) Freshness {
+	// Future observations cannot establish current movement or prediction age.
+	if observedAt.IsZero() || observedAt.After(now) {
+		return FreshnessUnavailable
+	}
+	if feedFreshness != FreshnessFresh {
+		return feedFreshness
+	}
+	return FreshnessAt(observedAt, now, staleAfter)
 }
 
 // FreshnessAt classifies a source timestamp. A non-positive staleAfter leaves
@@ -159,10 +271,34 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	result := snapshot
 	result.Trains = append([]Train(nil), snapshot.Trains...)
 	for index := range result.Trains {
-		if direction := result.Trains[index].DirectionID; direction != nil {
-			directionCopy := *direction
-			result.Trains[index].DirectionID = &directionCopy
+		train := &result.Trains[index]
+		train.DirectionID = clonePointer(train.DirectionID)
+		train.TripDelaySeconds = clonePointer(train.TripDelaySeconds)
+		train.PredictionDelaySeconds = clonePointer(train.PredictionDelaySeconds)
+		train.Stops = append([]StopPrediction(nil), train.Stops...)
+		for i := range train.Stops {
+			stop := &train.Stops[i]
+			stop.Sequence = clonePointer(stop.Sequence)
+			stop.Arrival = cloneEvent(stop.Arrival)
+			stop.Departure = cloneEvent(stop.Departure)
 		}
 	}
 	return result
+}
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneEvent(event *StopEvent) *StopEvent {
+	copy := clonePointer(event)
+	if copy != nil {
+		copy.DelaySeconds = clonePointer(copy.DelaySeconds)
+		copy.Uncertainty = clonePointer(copy.Uncertainty)
+	}
+	return copy
 }

@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"sort"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -45,15 +46,16 @@ type Loader struct {
 	store         *realtime.Store
 	url           string
 	routeID       string
+	sourceName    string
 	maxFutureSkew time.Duration
 	now           func() time.Time
 }
 
-func NewLoader(client *http.Client, store *realtime.Store, url, routeID string, maxFutureSkew time.Duration, now func() time.Time) *Loader {
+func NewLoader(client *http.Client, store *realtime.Store, sourceName, url, routeID string, maxFutureSkew time.Duration, now func() time.Time) *Loader {
 	if client == nil {
 		client = &http.Client{Timeout: 10 * time.Second}
 	}
-	return &Loader{client: client, store: store, url: url, routeID: routeID, maxFutureSkew: maxFutureSkew, now: now}
+	return &Loader{client: client, store: store, sourceName: sourceName, url: url, routeID: routeID, maxFutureSkew: maxFutureSkew, now: now}
 }
 
 func (l *Loader) Load(ctx context.Context) error {
@@ -89,6 +91,8 @@ func (l *Loader) Load(ctx context.Context) error {
 	if snapshot.SourceTimestamp.After(receivedAt.Add(l.maxFutureSkew)) {
 		return &FutureTimestampError{SourceTimestamp: snapshot.SourceTimestamp, ReceivedAt: receivedAt, MaxFutureSkew: l.maxFutureSkew}
 	}
+	snapshot.SourceName = l.sourceName
+	snapshot.ReceivedAt = receivedAt
 	if err := l.store.Replace(snapshot); err != nil {
 		return fmt.Errorf("publish GTFS-Realtime feed: %w", err)
 	}
@@ -112,14 +116,22 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 	}
 
 	sourceTimestamp := time.Unix(int64(feed.GetHeader().GetTimestamp()), 0).UTC()
-	vehicles := make(map[string][]*gtfs.VehiclePosition)
+	vehicles := make(map[string][]*gtfs.FeedEntity)
+	trips := make(map[string][]*gtfs.TripDescriptor)
 	for _, entity := range feed.GetEntity() {
+		if entity.GetIsDeleted() {
+			continue
+		}
+		if trip := entity.GetTripUpdate().GetTrip(); trip != nil && trip.GetTripId() != "" {
+			// Count all descriptors before filtering routes or canceled/empty trips.
+			trips[trip.GetTripId()] = append(trips[trip.GetTripId()], trip)
+		}
 		vehicle := entity.GetVehicle()
-		if entity.GetIsDeleted() || vehicle == nil || vehicle.GetTrip() == nil {
+		if vehicle == nil || vehicle.GetTrip() == nil {
 			continue
 		}
 		if tripID := vehicle.GetTrip().GetTripId(); tripID != "" {
-			vehicles[tripID] = append(vehicles[tripID], vehicle)
+			vehicles[tripID] = append(vehicles[tripID], entity)
 		}
 	}
 
@@ -130,37 +142,49 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 			continue
 		}
 		descriptor := update.GetTrip()
-		if descriptor.GetTripId() == "" || descriptor.GetRouteId() == "" {
+		if descriptor.GetTripId() == "" {
 			continue
 		}
 		if routeID != "" && descriptor.GetRouteId() != routeID {
 			continue
 		}
-		if descriptor.GetScheduleRelationship() == gtfs.TripDescriptor_CANCELED {
-			continue
+		vehicleEntity, match := matchingVehicle(descriptor, vehicles[descriptor.GetTripId()], trips[descriptor.GetTripId()])
+		vehicle := vehicleEntity.GetVehicle()
+		var vehicleTimestamp time.Time
+		if vehicle != nil {
+			vehicleTimestamp = observationTimestamp(vehicle.Timestamp)
 		}
-
-		nextStop := nextServedStop(update.GetStopTimeUpdate())
-		if nextStop == nil || nextStop.GetStopId() == "" {
-			continue
-		}
-		vehicle := matchingVehicle(descriptor, vehicles[descriptor.GetTripId()])
 		train := realtime.Train{
-			EntityID:        entity.GetId(),
-			RouteID:         descriptor.GetRouteId(),
-			TripID:          descriptor.GetTripId(),
-			ServiceDate:     descriptor.GetStartDate(),
-			DirectionID:     directionID(descriptor),
-			Direction:       direction(descriptor, nextStop),
-			PositionBasis:   realtime.PositionBasisRealtimePrediction,
-			MovementState:   movementState(vehicle),
-			SourceTimestamp: sourceTimestamp,
+			EntityID:             entity.GetId(),
+			RouteID:              descriptor.GetRouteId(),
+			TripID:               descriptor.GetTripId(),
+			ServiceDate:          descriptor.GetStartDate(),
+			StartTime:            descriptor.GetStartTime(),
+			ScheduleRelationship: descriptor.GetScheduleRelationship().String(),
+			Stops:                stopPredictions(update.GetStopTimeUpdate()),
+			TripDelaySeconds:     update.Delay,
+			DirectionID:          descriptor.DirectionId,
+			Direction:            direction(descriptor, ""),
+			PositionBasis:        realtime.PositionBasisRealtimePrediction,
+			MovementState:        movementState(vehicle),
+			SourceTimestamp:      sourceTimestamp,
+			TripUpdateTimestamp:  observationTimestamp(update.Timestamp),
+			VehicleEntityID:      vehicleEntity.GetId(),
+			VehicleTimestamp:     vehicleTimestamp,
+			VehicleMatch:         match,
 		}
-		train.NextStopID = nextStop.GetStopId()
-		train.NextStopSequence = nextStop.GetStopSequence()
-		train.PredictedAt, train.PredictionDelaySeconds = prediction(nextStop, update)
-		if train.NextStopSequence == 0 && vehicle != nil && vehicle.GetStopId() == train.NextStopID {
-			train.NextStopSequence = vehicle.GetCurrentStopSequence()
+		if nextStop := train.NextServedStop(); nextStop != nil {
+			train.NextStopID = nextStop.StopID
+			train.Direction = direction(descriptor, nextStop.StopID)
+			if nextStop.Sequence != nil {
+				train.NextStopSequence = *nextStop.Sequence
+			} else if vehicle != nil && vehicle.GetStopId() == train.NextStopID {
+				train.NextStopSequence = vehicle.GetCurrentStopSequence()
+			}
+			train.PredictedAt, train.PredictionDelaySeconds = train.Prediction(nextStop)
+		}
+		if train.Canceled() {
+			train.MovementState = realtime.MovementStateUnknown
 		}
 		trains = append(trains, train)
 	}
@@ -168,18 +192,30 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 	return realtime.Snapshot{SourceTimestamp: sourceTimestamp, Trains: trains}, nil
 }
 
-func matchingVehicle(trip *gtfs.TripDescriptor, candidates []*gtfs.VehiclePosition) *gtfs.VehiclePosition {
-	var match *gtfs.VehiclePosition
+func matchingVehicle(trip *gtfs.TripDescriptor, candidates []*gtfs.FeedEntity, trips []*gtfs.TripDescriptor) (*gtfs.FeedEntity, realtime.VehicleMatch) {
+	var match *gtfs.FeedEntity
 	for _, candidate := range candidates {
-		if candidate == nil || !compatibleTrips(trip, candidate.GetTrip()) {
+		if !compatibleTrips(trip, candidate.GetVehicle().GetTrip()) {
 			continue
 		}
 		if match != nil {
-			return nil
+			return nil, realtime.VehicleAmbiguous
 		}
 		match = candidate
 	}
-	return match
+	if match == nil {
+		return nil, realtime.VehicleUnmatched
+	}
+	compatible := 0
+	for _, other := range trips {
+		if compatibleTrips(other, match.GetVehicle().GetTrip()) {
+			compatible++
+		}
+	}
+	if compatible != 1 {
+		return nil, realtime.VehicleAmbiguous
+	}
+	return match, realtime.VehicleMatched
 }
 
 func compatibleTrips(left, right *gtfs.TripDescriptor) bool {
@@ -198,32 +234,47 @@ func differentWhenPresent(left, right string) bool {
 	return left != "" && right != "" && left != right
 }
 
-func nextServedStop(updates []*gtfs.TripUpdate_StopTimeUpdate) *gtfs.TripUpdate_StopTimeUpdate {
+func stopPredictions(updates []*gtfs.TripUpdate_StopTimeUpdate) []realtime.StopPrediction {
+	stops := make([]realtime.StopPrediction, 0, len(updates))
+	allSequences := true
 	for _, update := range updates {
-		if update != nil && update.GetScheduleRelationship() != gtfs.TripUpdate_StopTimeUpdate_SKIPPED {
-			return update
+		if update == nil {
+			continue
 		}
+		allSequences = allSequences && update.StopSequence != nil
+		stops = append(stops, realtime.StopPrediction{
+			StopID: update.GetStopId(), Sequence: update.StopSequence,
+			Relationship: realtime.StopRelationship(update.GetScheduleRelationship().String()),
+			Arrival:      stopEvent(update.GetArrival()), Departure: stopEvent(update.GetDeparture()),
+		})
 	}
-	return nil
+	// Without static GTFS, missing sequences cannot be inferred from stop IDs.
+	// Preserve feed order unless every stop has an explicit sequence.
+	if allSequences {
+		sort.SliceStable(stops, func(i, j int) bool { return *stops[i].Sequence < *stops[j].Sequence })
+	}
+	return stops
 }
 
-func prediction(stop *gtfs.TripUpdate_StopTimeUpdate, trip *gtfs.TripUpdate) (time.Time, int32) {
-	event := stop.GetArrival()
-	departure := stop.GetDeparture()
-	if event == nil || (event.GetTime() <= 0 && departure != nil && departure.GetTime() > 0) {
-		event = departure
-	}
-	delay := trip.GetDelay()
+func stopEvent(event *gtfs.TripUpdate_StopTimeEvent) *realtime.StopEvent {
 	if event == nil {
-		return time.Time{}, delay
+		return nil
 	}
-	if event.Delay != nil {
-		delay = event.GetDelay()
+	normalized := &realtime.StopEvent{DelaySeconds: event.Delay, Uncertainty: event.Uncertainty}
+	if event.Time != nil {
+		normalized.Time = time.Unix(*event.Time, 0).UTC()
 	}
-	if event.GetTime() <= 0 {
-		return time.Time{}, delay
+	if event.ScheduledTime != nil {
+		normalized.ScheduledTime = time.Unix(*event.ScheduledTime, 0).UTC()
 	}
-	return time.Unix(event.GetTime(), 0).UTC(), delay
+	return normalized
+}
+
+func observationTimestamp(value *uint64) time.Time {
+	if value == nil || *value > math.MaxInt64 {
+		return time.Time{}
+	}
+	return time.Unix(int64(*value), 0).UTC()
 }
 
 func movementState(vehicle *gtfs.VehiclePosition) realtime.MovementState {
@@ -239,15 +290,7 @@ func movementState(vehicle *gtfs.VehiclePosition) realtime.MovementState {
 	return realtime.MovementStateUnknown
 }
 
-func directionID(trip *gtfs.TripDescriptor) *uint32 {
-	if trip.DirectionId != nil {
-		value := trip.GetDirectionId()
-		return &value
-	}
-	return nil
-}
-
-func direction(trip *gtfs.TripDescriptor, stop *gtfs.TripUpdate_StopTimeUpdate) realtime.Direction {
+func direction(trip *gtfs.TripDescriptor, stopID string) realtime.Direction {
 	if proto.HasExtension(trip, gtfs.E_NyctTripDescriptor) {
 		if extension, ok := proto.GetExtension(trip, gtfs.E_NyctTripDescriptor).(*gtfs.NyctTripDescriptor); ok && extension.Direction != nil {
 			switch extension.GetDirection() {
@@ -262,14 +305,12 @@ func direction(trip *gtfs.TripDescriptor, stop *gtfs.TripUpdate_StopTimeUpdate) 
 			}
 		}
 	}
-	if stop != nil {
-		if id := stop.GetStopId(); len(id) > 0 {
-			switch id[len(id)-1] {
-			case 'N':
-				return realtime.DirectionNorthbound
-			case 'S':
-				return realtime.DirectionSouthbound
-			}
+	if len(stopID) > 0 {
+		switch stopID[len(stopID)-1] {
+		case 'N':
+			return realtime.DirectionNorthbound
+		case 'S':
+			return realtime.DirectionSouthbound
 		}
 	}
 	return realtime.DirectionUnknown

@@ -16,8 +16,8 @@ func TestPartialFeedResponses(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
 	ace, nqrw := realtime.NewStore(), realtime.NewStore()
 	replace(t, ace, realtime.Snapshot{SourceTimestamp: now, Trains: []realtime.Train{
-		{EntityID: "a", RouteID: "A", TripID: "trip-a"},
-		{EntityID: "s", RouteID: "S", TripID: "trip-s"},
+		{NextStopID: "A01N", EntityID: "a", RouteID: "A", TripID: "trip-a"},
+		{NextStopID: "A01N", EntityID: "s", RouteID: "S", TripID: "trip-s"},
 	}})
 	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute)
 
@@ -76,7 +76,7 @@ func TestPartialFeedResponses(t *testing.T) {
 func TestLoadedFeedsKeepFreshnessSeparateFromCoverage(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 12, 2, 0, 0, time.UTC)
 	ace, nqrw := realtime.NewStore(), realtime.NewStore()
-	replace(t, ace, realtime.Snapshot{SourceTimestamp: now.Add(-2 * time.Minute), Trains: []realtime.Train{{RouteID: "A", TripID: "trip-a"}}})
+	replace(t, ace, realtime.Snapshot{SourceTimestamp: now.Add(-2 * time.Minute), Trains: []realtime.Train{{NextStopID: "A01N", RouteID: "A", TripID: "trip-a"}}})
 	replace(t, nqrw, realtime.Snapshot{SourceTimestamp: now})
 	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute)
 
@@ -185,13 +185,13 @@ func TestTrainDTOUsesSnakeCaseAndNullTimestamps(t *testing.T) {
 		Direction:              realtime.DirectionNorthbound,
 		NextStopID:             "A01N",
 		NextStopSequence:       4,
-		PredictionDelaySeconds: 60,
+		PredictionDelaySeconds: new(int32(60)),
 		PositionBasis:          realtime.PositionBasisRealtimePrediction,
 		MovementState:          realtime.MovementStateInferredMoving,
 	}}})
 	recorder := get(NewHandler([]Source{{Name: "ace", Routes: []string{"A", "C", "E"}, Store: store}}, telemetry.New(), func() time.Time { return now }, time.Minute), "/api/v1/trains?route_id=A")
 
-	want := `{"as_of":"2026-09-02T12:00:00Z","freshness":"fresh","trains":[{"entity_id":"vehicle-a","route_id":"A","trip_id":"trip-a","service_date":"20260902","direction_id":null,"direction":"northbound","next_stop_id":"A01N","next_stop_sequence":4,"predicted_at":null,"prediction_delay_seconds":60,"position_basis":"realtime_prediction","movement_state":"inferred_moving","freshness":"fresh","source_timestamp":"2026-09-02T12:00:00Z"}],"coverage":"complete","sources":[{"name":"ace","routes":["A","C","E"],"source_timestamp":"2026-09-02T12:00:00Z","freshness":"fresh"}]}`
+	want := `{"as_of":"2026-09-02T12:00:00Z","freshness":"fresh","trains":[{"entity_id":"vehicle-a","route_id":"A","trip_id":"trip-a","service_date":"20260902","start_time":"","direction_id":null,"direction":"northbound","next_stop_id":"A01N","next_stop_sequence":4,"predicted_at":null,"prediction_delay_seconds":60,"position_basis":"realtime_prediction","movement_state":"unknown","freshness":"fresh","source_timestamp":"2026-09-02T12:00:00Z","source_name":"","received_at":null,"trip_update_timestamp":null,"trip_update_freshness":"unavailable","vehicle_entity_id":"","vehicle_timestamp":null,"vehicle_freshness":"unavailable","vehicle_match":"unmatched"}],"coverage":"complete","sources":[{"name":"ace","routes":["A","C","E"],"source_timestamp":"2026-09-02T12:00:00Z","freshness":"fresh"}]}`
 	body := strings.TrimSpace(recorder.Body.String())
 	if body != want {
 		t.Errorf("trains body = %s, want %s", body, want)
@@ -204,8 +204,8 @@ func TestTrainDTOUsesSnakeCaseAndNullTimestamps(t *testing.T) {
 func TestMetricsUseAvailableFeedsAndAnyFreshReadiness(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
 	ace, nqrw := realtime.NewStore(), realtime.NewStore()
-	replace(t, ace, realtime.Snapshot{SourceTimestamp: now, Trains: []realtime.Train{{RouteID: "A"}}})
-	replace(t, nqrw, realtime.Snapshot{SourceTimestamp: now.Add(-2 * time.Minute), Trains: []realtime.Train{{RouteID: "N"}, {RouteID: "Q"}}})
+	replace(t, ace, realtime.Snapshot{SourceTimestamp: now, Trains: []realtime.Train{{NextStopID: "A01N", RouteID: "A"}}})
+	replace(t, nqrw, realtime.Snapshot{SourceTimestamp: now.Add(-2 * time.Minute), Trains: []realtime.Train{{NextStopID: "A01N", RouteID: "N"}, {NextStopID: "A01N", RouteID: "Q"}}})
 	metrics := telemetry.New("ace", "nqrw")
 	// Deliberately stale telemetry proves aggregate gauges read the source stores.
 	metrics.Record("ace", true, 250*time.Millisecond, now, now.Add(-10*time.Minute), 7)

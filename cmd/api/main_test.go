@@ -107,8 +107,8 @@ func TestRefreshPublishesAvailableFeedAtStartup(t *testing.T) {
 		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
 		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
 	}
-	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "", 30*time.Second, testReceiptTime)
-	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, "fixture", ace.URL, "", 30*time.Second, testReceiptTime)
+	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, "fixture", nqrw.URL, "", 30*time.Second, testReceiptTime)
 
 	refresh(context.Background(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), metrics, feeds)
 	if got := feeds[0].store.Load(base, time.Minute); len(got.Trains) != 1 || got.Trains[0].RouteID != "A" {
@@ -138,8 +138,8 @@ func TestRefreshRetainsLastKnownGoodPerFeed(t *testing.T) {
 		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
 		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
 	}
-	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "", 30*time.Second, testReceiptTime)
-	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, "fixture", ace.URL, "", 30*time.Second, testReceiptTime)
+	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, "fixture", nqrw.URL, "", 30*time.Second, testReceiptTime)
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logs, nil))
 
@@ -184,8 +184,8 @@ func TestRefreshPublishesFastFeedBeforeSlowFeedCompletes(t *testing.T) {
 		{name: "ace", routes: []string{"A", "C", "E"}, store: realtime.NewStore()},
 		{name: "nqrw", routes: []string{"N", "Q", "R", "W"}, store: realtime.NewStore()},
 	}
-	feeds[0].loader = ingest.NewLoader(fast.Client(), feeds[0].store, fast.URL, "", 30*time.Second, testReceiptTime)
-	feeds[1].loader = ingest.NewLoader(slow.Client(), feeds[1].store, slow.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(fast.Client(), feeds[0].store, "fixture", fast.URL, "", 30*time.Second, testReceiptTime)
+	feeds[1].loader = ingest.NewLoader(slow.Client(), feeds[1].store, "fixture", slow.URL, "", 30*time.Second, testReceiptTime)
 	done := make(chan struct{})
 	go func() {
 		refresh(context.Background(), slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil)), metrics, feeds)
@@ -228,8 +228,8 @@ func TestRefreshAcceptsRecoveredFeedOlderThanOtherFeed(t *testing.T) {
 		{name: "ace", store: realtime.NewStore()},
 		{name: "nqrw", store: realtime.NewStore()},
 	}
-	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, ace.URL, "", 30*time.Second, testReceiptTime)
-	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, nqrw.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(ace.Client(), feeds[0].store, "fixture", ace.URL, "", 30*time.Second, testReceiptTime)
+	feeds[1].loader = ingest.NewLoader(nqrw.Client(), feeds[1].store, "fixture", nqrw.URL, "", 30*time.Second, testReceiptTime)
 	logger := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 
 	refresh(context.Background(), logger, metrics, feeds)
@@ -301,7 +301,7 @@ func TestRefreshTransitionLogs(t *testing.T) {
 	}))
 	defer server.Close()
 	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
-	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, testReceiptTime)
 	metrics := telemetry.New("ace")
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil)).With("service", "hol-up-api")
@@ -376,7 +376,7 @@ func TestRefreshInitialFailureAndCancellation(t *testing.T) {
 	server := feedServer(t, []byte("bad"))
 	defer server.Close()
 	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
-	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, testReceiptTime)
 	metrics := telemetry.New("ace")
 	var logs bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&logs, nil))
@@ -401,7 +401,7 @@ func TestRefreshInitialFailureAndCancellation(t *testing.T) {
 		<-request.Context().Done()
 	}))
 	defer blocked.Close()
-	feeds[0].loader = ingest.NewLoader(blocked.Client(), feeds[0].store, blocked.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(blocked.Client(), feeds[0].store, "fixture", blocked.URL, "", 30*time.Second, testReceiptTime)
 	done := make(chan struct{})
 	go func() {
 		refresh(ctx, logger, metrics, feeds)
@@ -418,7 +418,7 @@ func TestRefreshInitialFailureAndCancellation(t *testing.T) {
 func TestRefreshSanitizesURLError(t *testing.T) {
 	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
 	client := &http.Client{Transport: failingTransport{}}
-	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, "https://user:password@example.test/feed?token=secret", "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(client, feeds[0].store, "fixture", "https://user:password@example.test/feed?token=secret", "", 30*time.Second, testReceiptTime)
 	var logs bytes.Buffer
 	refresh(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)), telemetry.New("ace"), feeds)
 	for _, secret := range []string{"user", "password", "example.test", "token", "secret", "/feed"} {
@@ -444,7 +444,7 @@ func TestRefreshSanitizesMalformedRedirect(t *testing.T) {
 	defer server.Close()
 
 	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
-	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, testReceiptTime)
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, testReceiptTime)
 	var logs bytes.Buffer
 	refresh(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)), telemetry.New("ace"), feeds)
 
@@ -485,7 +485,7 @@ func TestRefreshLogsHTTPStatusWithoutResponseDetails(t *testing.T) {
 			defer server.Close()
 
 			feeds := []feed{{name: "ace", store: realtime.NewStore()}}
-			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, testReceiptTime)
+			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, testReceiptTime)
 			var logs bytes.Buffer
 			refresh(context.Background(), slog.New(slog.NewJSONHandler(&logs, nil)), telemetry.New("ace"), feeds)
 
@@ -645,7 +645,7 @@ func TestRefreshFutureTimestampRecoveryAndWarnings(t *testing.T) {
 			server := feedServer(t, responses...)
 			defer server.Close()
 			feeds := []feed{{name: "ace", routes: []string{"A"}, store: realtime.NewStore()}}
-			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, func() time.Time { return now })
+			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, func() time.Time { return now })
 			metrics := telemetry.New("ace")
 			var logs bytes.Buffer
 			logger := slog.New(slog.NewJSONHandler(&logs, nil))
@@ -755,13 +755,13 @@ func TestRefreshFutureOnlyStartupAndHealthySibling(t *testing.T) {
 			server := feedServer(t, future, future)
 			defer server.Close()
 			feeds := []feed{{name: "ace", routes: []string{"A"}, store: realtime.NewStore()}}
-			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, func() time.Time { return base })
+			feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, func() time.Time { return base })
 			if healthySibling {
 				valid := feedBytes(t, base, "N", "healthy")
 				sibling := feedServer(t, valid, valid)
 				defer sibling.Close()
 				store := realtime.NewStore()
-				feeds = append(feeds, feed{name: "nqrw", routes: []string{"N"}, store: store, loader: ingest.NewLoader(sibling.Client(), store, sibling.URL, "", 30*time.Second, func() time.Time { return base })})
+				feeds = append(feeds, feed{name: "nqrw", routes: []string{"N"}, store: store, loader: ingest.NewLoader(sibling.Client(), store, "fixture", sibling.URL, "", 30*time.Second, func() time.Time { return base })})
 			}
 			metrics := telemetry.New("ace")
 			var logs bytes.Buffer
@@ -813,7 +813,7 @@ func TestRefreshSuppressesFutureRejectionOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	feeds := []feed{{name: "ace", store: realtime.NewStore()}}
-	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, server.URL, "", 30*time.Second, func() time.Time {
+	feeds[0].loader = ingest.NewLoader(server.Client(), feeds[0].store, "fixture", server.URL, "", 30*time.Second, func() time.Time {
 		cancel()
 		return base
 	})

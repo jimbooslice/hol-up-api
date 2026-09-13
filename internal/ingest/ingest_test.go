@@ -73,8 +73,8 @@ func TestDecodePairsTripAndVehicle(t *testing.T) {
 	if train.DirectionID != nil || train.Direction != realtime.DirectionSouthbound {
 		t.Fatalf("direction = %v/%q, want nil/southbound", train.DirectionID, train.Direction)
 	}
-	if train.PredictionDelaySeconds != 45 || !train.PredictedAt.Equal(sourceTime.Add(2*time.Minute)) {
-		t.Fatalf("prediction = %s/%d, want +2m/45", train.PredictedAt, train.PredictionDelaySeconds)
+	if (train.PredictionDelaySeconds == nil || *train.PredictionDelaySeconds != 45) || !train.PredictedAt.Equal(sourceTime.Add(2*time.Minute)) {
+		t.Fatalf("prediction = %s/%v, want +2m/45", train.PredictedAt, train.PredictionDelaySeconds)
 	}
 }
 
@@ -174,9 +174,9 @@ func TestPredictionUsesAbsoluteDepartureWhenArrivalHasOnlyDelay(t *testing.T) {
 		Arrival:   &gtfs.TripUpdate_StopTimeEvent{Delay: proto.Int32(30)},
 		Departure: &gtfs.TripUpdate_StopTimeEvent{Time: proto.Int64(want.Unix()), Delay: proto.Int32(45)},
 	}
-	got, delay := prediction(stop, &gtfs.TripUpdate{})
-	if !got.Equal(want) || delay != 45 {
-		t.Fatalf("prediction() = %s/%d, want %s/45", got, delay, want)
+	got, delay := (realtime.Train{}).Prediction(&stopPredictions([]*gtfs.TripUpdate_StopTimeUpdate{stop})[0])
+	if !got.Equal(want) || (delay == nil || *delay != 45) {
+		t.Fatalf("prediction() = %s/%v, want %s/45", got, delay, want)
 	}
 }
 
@@ -197,7 +197,7 @@ func TestLoaderKeepsLastKnownGoodOnBadResponse(t *testing.T) {
 	defer server.Close()
 
 	store := realtime.NewStore()
-	loader := NewLoader(server.Client(), store, server.URL, "A", 30*time.Second, func() time.Time { return sourceTime })
+	loader := NewLoader(server.Client(), store, "fixture", server.URL, "A", 30*time.Second, func() time.Time { return sourceTime })
 	if err := loader.Load(context.Background()); err != nil {
 		t.Fatalf("first Load() error = %v", err)
 	}
@@ -234,7 +234,7 @@ func TestLoaderFollowsValidRedirects(t *testing.T) {
 	for _, path := range []string{"/relative", "/absolute"} {
 		t.Run(path[1:], func(t *testing.T) {
 			store := realtime.NewStore()
-			if err := NewLoader(server.Client(), store, server.URL+path, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background()); err != nil {
+			if err := NewLoader(server.Client(), store, "fixture", server.URL+path, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background()); err != nil {
 				t.Fatalf("Load() error = %v", err)
 			}
 			got := store.Load(sourceTime, time.Minute)
@@ -258,7 +258,7 @@ func TestLoaderReturnsTypedHTTPStatusWithoutResponseDetails(t *testing.T) {
 			defer server.Close()
 
 			store := realtime.NewStore()
-			err := NewLoader(server.Client(), store, server.URL, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background())
+			err := NewLoader(server.Client(), store, "fixture", server.URL, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background())
 			var statusError HTTPStatusError
 			if !errors.As(err, &statusError) || int(statusError) != status {
 				t.Fatalf("Load() error = %v, want HTTPStatusError(%d)", err, status)
@@ -284,7 +284,7 @@ func TestLoaderRejectsOversizeFeed(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := NewLoader(server.Client(), realtime.NewStore(), server.URL, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background())
+	err := NewLoader(server.Client(), realtime.NewStore(), "fixture", server.URL, "A", 30*time.Second, func() time.Time { return sourceTime }).Load(context.Background())
 	if !errors.Is(err, ErrFeedTooLarge) {
 		t.Fatalf("Load() error = %v, want ErrFeedTooLarge", err)
 	}
@@ -345,7 +345,7 @@ func TestLoaderFutureTimestampBoundary(t *testing.T) {
 			defer server.Close()
 			store := realtime.NewStore()
 			calls := 0
-			loader := NewLoader(server.Client(), store, server.URL, "", test.tolerance, func() time.Time {
+			loader := NewLoader(server.Client(), store, "fixture", server.URL, "", test.tolerance, func() time.Time {
 				calls++
 				return test.receivedAt
 			})
@@ -391,7 +391,7 @@ func TestLoaderCapturesReceiptAfterBodyRead(t *testing.T) {
 		}))}, nil
 	})}
 	store := realtime.NewStore()
-	if err := NewLoader(client, store, "http://fixture.test/feed", "", 0, func() time.Time { return now }).Load(t.Context()); err != nil {
+	if err := NewLoader(client, store, "fixture", "http://fixture.test/feed", "", 0, func() time.Time { return now }).Load(t.Context()); err != nil {
 		t.Fatalf("receipt captured before full body read: %v", err)
 	}
 	if timestamp, _, _ := store.Status(receivedAt, time.Minute); !timestamp.Equal(receivedAt) {
@@ -423,7 +423,7 @@ func TestLoaderAllowsFutureStopPredictions(t *testing.T) {
 	}))
 	defer server.Close()
 	store := realtime.NewStore()
-	if err := NewLoader(server.Client(), store, server.URL, "", 0, func() time.Time { return base }).Load(t.Context()); err != nil {
+	if err := NewLoader(server.Client(), store, "fixture", server.URL, "", 0, func() time.Time { return base }).Load(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := store.Load(base, time.Minute)
@@ -459,5 +459,109 @@ func TestDecodeTimestampValidation(t *testing.T) {
 				t.Fatalf("Decode() = %v, want %q", err, test.wantError)
 			}
 		})
+	}
+}
+
+func TestDecodeRetainsCompleteOrderedState(t *testing.T) {
+	now := time.Unix(1000, 0).UTC()
+	update := tripUpdateEntity("update", "trip", "A", "A01N")
+	update.TripUpdate.Timestamp = proto.Uint64(900)
+	update.TripUpdate.Delay = proto.Int32(50)
+	update.TripUpdate.StopTimeUpdate = []*gtfs.TripUpdate_StopTimeUpdate{
+		{StopSequence: proto.Uint32(3), StopId: proto.String("A03N"), Arrival: &gtfs.TripUpdate_StopTimeEvent{Time: proto.Int64(1200), Uncertainty: proto.Int32(0)}, Departure: &gtfs.TripUpdate_StopTimeEvent{Time: proto.Int64(1230), Delay: proto.Int32(0)}},
+		{StopSequence: proto.Uint32(1), StopId: proto.String("A01N"), ScheduleRelationship: gtfs.TripUpdate_StopTimeUpdate_SKIPPED.Enum()},
+		{StopSequence: proto.Uint32(2), StopId: proto.String("A02N"), ScheduleRelationship: gtfs.TripUpdate_StopTimeUpdate_NO_DATA.Enum()},
+	}
+	canceled := tripUpdateEntity("canceled", "canceled-trip", "A", "A04N")
+	canceled.TripUpdate.Trip.ScheduleRelationship = gtfs.TripDescriptor_CANCELED.Enum()
+	canceled.TripUpdate.StopTimeUpdate = nil
+	deleted := tripUpdateEntity("deleted", "deleted-trip", "A", "A05N")
+	deleted.TripUpdate.Trip.ScheduleRelationship = gtfs.TripDescriptor_DELETED.Enum()
+	skipped := tripUpdateEntity("all-skipped", "skipped-trip", "A", "A06N")
+	skipped.TripUpdate.StopTimeUpdate[0].ScheduleRelationship = gtfs.TripUpdate_StopTimeUpdate_SKIPPED.Enum()
+	snapshot, err := Decode(mustMarshal(t, &gtfs.FeedMessage{
+		Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0"), Timestamp: proto.Uint64(uint64(now.Unix()))},
+		Entity: []*gtfs.FeedEntity{update, canceled, deleted, skipped},
+	}), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Trains) != 4 {
+		t.Fatalf("lost trip records: %+v", snapshot)
+	}
+	trip := snapshot.Trains[0]
+	if len(trip.Stops) != 3 || trip.NextStopID != "A02N" || trip.NextStopSequence != 2 || !trip.PredictedAt.IsZero() || trip.PredictionDelaySeconds != nil || trip.TripUpdateTimestamp.Unix() != 900 || trip.StartTime != "13:00:00" {
+		t.Fatalf("trip = %+v", trip)
+	}
+	for i, stop := range trip.Stops {
+		if *stop.Sequence != uint32(i+1) {
+			t.Fatalf("stop order = %+v", trip.Stops)
+		}
+	}
+	last := trip.Stops[2]
+	if last.Arrival.Time.Unix() != 1200 || last.Arrival.DelaySeconds != nil || last.Arrival.Uncertainty == nil || *last.Arrival.Uncertainty != 0 || last.Departure.Time.Unix() != 1230 || last.Departure.DelaySeconds == nil || *last.Departure.DelaySeconds != 0 {
+		t.Fatalf("events lost presence: %+v / %+v", last.Arrival, last.Departure)
+	}
+	if !snapshot.Trains[1].Canceled() || !snapshot.Trains[2].Canceled() || snapshot.Trains[3].NextStopID != "" || len(snapshot.Trains[3].Stops) != 1 {
+		t.Fatalf("inactive state lost: %+v", snapshot.Trains)
+	}
+}
+
+func TestDecodeVehicleMatchingIsUniqueInBothDirections(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		other   func(*gtfs.TripDescriptor)
+		vehicle func(*gtfs.TripDescriptor)
+		want    realtime.VehicleMatch
+	}{
+		{"different dates partial vehicle", func(d *gtfs.TripDescriptor) { d.StartDate = proto.String("20260903") }, func(d *gtfs.TripDescriptor) { d.StartDate = nil }, realtime.VehicleAmbiguous},
+		{"different starts partial vehicle", func(d *gtfs.TripDescriptor) { d.StartTime = proto.String("14:00:00") }, func(d *gtfs.TripDescriptor) { d.StartTime = nil }, realtime.VehicleAmbiguous},
+		{"different routes before filtering", func(d *gtfs.TripDescriptor) { d.RouteId = proto.String("C") }, func(d *gtfs.TripDescriptor) { d.RouteId = nil }, realtime.VehicleAmbiguous},
+		{"different directions", func(d *gtfs.TripDescriptor) { d.DirectionId = proto.Uint32(1) }, func(d *gtfs.TripDescriptor) { d.DirectionId = nil }, realtime.VehicleAmbiguous},
+		{"duplicate descriptors", func(d *gtfs.TripDescriptor) {}, func(d *gtfs.TripDescriptor) {}, realtime.VehicleAmbiguous},
+		{"exact instance", func(d *gtfs.TripDescriptor) { d.StartTime = proto.String("14:00:00") }, func(d *gtfs.TripDescriptor) {}, realtime.VehicleMatched},
+		{"conflicting route", func(d *gtfs.TripDescriptor) {}, func(d *gtfs.TripDescriptor) { d.RouteId = proto.String("N") }, realtime.VehicleUnmatched},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			first := tripUpdateEntity("first", "trip", "A", "A01N")
+			first.TripUpdate.Trip.DirectionId = proto.Uint32(0)
+			other := proto.Clone(first).(*gtfs.FeedEntity)
+			other.Id = proto.String("other")
+			other.TripUpdate.StopTimeUpdate = nil // Still participates in reverse uniqueness.
+			test.other(other.TripUpdate.Trip)
+			vehicleTrip := proto.Clone(first.TripUpdate.Trip).(*gtfs.TripDescriptor)
+			test.vehicle(vehicleTrip)
+			snapshot, err := Decode(mustMarshal(t, &gtfs.FeedMessage{
+				Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0"), Timestamp: proto.Uint64(1000)},
+				Entity: []*gtfs.FeedEntity{first, other, {Id: proto.String("vehicle"), Vehicle: &gtfs.VehiclePosition{Trip: vehicleTrip, Timestamp: proto.Uint64(1000), CurrentStatus: gtfs.VehiclePosition_STOPPED_AT.Enum()}}},
+			}), "A")
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := snapshot.Trains[0]
+			if got.VehicleMatch != test.want {
+				t.Fatalf("match = %s, want %s", got.VehicleMatch, test.want)
+			}
+			if test.want != realtime.VehicleMatched && (got.MovementState != realtime.MovementStateUnknown || got.VehicleEntityID != "" || !got.VehicleTimestamp.IsZero()) {
+				t.Fatalf("ambiguous observation attached: %+v", got)
+			}
+			if test.want == realtime.VehicleMatched && (got.VehicleEntityID != "vehicle" || got.VehicleTimestamp.Unix() != 1000 || got.MovementState != realtime.MovementStateReportedStopped) {
+				t.Fatalf("observation not retained: %+v", got)
+			}
+		})
+	}
+}
+
+func TestStopOrderWithoutSequencesAndEventPresence(t *testing.T) {
+	stops := stopPredictions([]*gtfs.TripUpdate_StopTimeUpdate{
+		{StopId: proto.String("A03N"), StopSequence: proto.Uint32(3)},
+		{StopId: proto.String("A01N"), Arrival: &gtfs.TripUpdate_StopTimeEvent{Time: proto.Int64(0), ScheduledTime: proto.Int64(10)}},
+		{StopSequence: proto.Uint32(2), Departure: &gtfs.TripUpdate_StopTimeEvent{}},
+	})
+	if len(stops) != 3 || stops[0].StopID != "A03N" || stops[1].Sequence != nil || stops[1].Arrival.Time.IsZero() || stops[1].Arrival.Time.Unix() != 0 || stops[1].Arrival.ScheduledTime.Unix() != 10 || stops[2].StopID != "" || stops[2].Arrival != nil || stops[2].Departure == nil || stops[2].Departure.DelaySeconds != nil {
+		t.Fatalf("lost field presence/order: %+v", stops)
+	}
+	if !observationTimestamp(nil).IsZero() || !observationTimestamp(proto.Uint64(1<<63)).IsZero() {
+		t.Fatal("invalid observation timestamp accepted")
 	}
 }

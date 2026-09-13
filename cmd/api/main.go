@@ -124,7 +124,7 @@ func configuredFeeds(client *http.Client, maxFutureSkew time.Duration, now func(
 	}
 	for index := range feeds {
 		feeds[index].store = realtime.NewStore()
-		feeds[index].loader = ingest.NewLoader(client, feeds[index].store, feeds[index].url, "", maxFutureSkew, now)
+		feeds[index].loader = ingest.NewLoader(client, feeds[index].store, feeds[index].name, feeds[index].url, "", maxFutureSkew, now)
 	}
 	return feeds
 }

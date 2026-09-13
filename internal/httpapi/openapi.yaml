@@ -1,7 +1,7 @@
 openapi: 3.1.1
 info:
   title: Hol Up transit API
-  version: 1.1.0
+  version: 1.2.0
   description: Realtime service from all eight feeds in MTA's Subway Realtime catalog, including Staten Island Railway.
 paths:
   /healthz:
@@ -157,12 +157,14 @@ components:
           items:
             $ref: '#/components/schemas/Train'
     Train:
+      description: Compact trip view with an identified next served stop. CANCELED, DELETED, and trips without an identified route or served stop remain in normalized state but are excluded here.
       type: object
       required:
         - entity_id
         - route_id
         - trip_id
         - service_date
+        - start_time
         - direction_id
         - direction
         - next_stop_id
@@ -173,6 +175,14 @@ components:
         - movement_state
         - freshness
         - source_timestamp
+        - source_name
+        - received_at
+        - trip_update_timestamp
+        - trip_update_freshness
+        - vehicle_entity_id
+        - vehicle_timestamp
+        - vehicle_freshness
+        - vehicle_match
       properties:
         entity_id:
           type: string
@@ -183,6 +193,9 @@ components:
         service_date:
           type: string
           description: Service date in YYYYMMDD format.
+        start_time:
+          type: string
+          description: Trip instance start time, empty when omitted upstream.
         direction_id:
           type: [integer, 'null']
           minimum: 0
@@ -197,17 +210,43 @@ components:
         predicted_at:
           $ref: '#/components/schemas/Timestamp'
         prediction_delay_seconds:
-          type: integer
+          type: [integer, 'null']
+          description: Event delay, falling back to an explicit trip delay. Null when absent or NO_DATA; zero means explicitly on time.
         position_basis:
           type: string
           enum: [realtime_prediction, schedule_fallback]
         movement_state:
           type: string
+          description: Unknown unless a uniquely matched vehicle observation and its feed are fresh. Trip observation age is reported independently.
           enum: [inferred_moving, reported_stopped, unknown]
         freshness:
           $ref: '#/components/schemas/Freshness'
+          description: Freshness of the source feed; consult trip_update_freshness and vehicle_freshness for individual observations.
         source_timestamp:
           $ref: '#/components/schemas/Timestamp'
+        source_name:
+          type: string
+          description: Stable configured feed name that supplied this trip update.
+        received_at:
+          $ref: '#/components/schemas/Timestamp'
+        trip_update_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+          description: Upstream trip observation time; null when absent or out of range.
+        trip_update_freshness:
+          $ref: '#/components/schemas/Freshness'
+          description: Age of the trip observation, capped by feed freshness. Missing or future observation times are unavailable.
+        vehicle_entity_id:
+          type: string
+          description: Matched vehicle source entity ID, empty without a unique match.
+        vehicle_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+          description: Matched vehicle observation time; null when absent or out of range.
+        vehicle_freshness:
+          $ref: '#/components/schemas/Freshness'
+          description: Age of the matched vehicle observation, capped by feed freshness. Missing or future observation times are unavailable.
+        vehicle_match:
+          type: string
+          enum: [matched, unmatched, ambiguous]
     Source:
       type: object
       required: [name, routes, source_timestamp, freshness]

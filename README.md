@@ -76,6 +76,47 @@ readiness and train count, it reports bounded per-feed refresh outcomes,
 durations, timestamps, freshness, and train counts with one of the eight source
 names as the `feed` label.
 
+## Realtime semantics
+
+`predicted_at` and `prediction_delay_seconds` are independently nullable. An
+absolute arrival/departure does not imply zero delay. Explicit event delay
+wins over an explicit trip delay; omitted values remain unknown. The compact
+view prefers an absolute arrival, then an absolute departure, then a delay-only
+event. `NO_DATA` suppresses both prediction and delay, including trip-delay
+fallback. No absolute time is invented from delay without a static schedule.
+
+Train `freshness` continues to describe the source feed. The separate
+`trip_update_timestamp` / `trip_update_freshness` and `vehicle_timestamp` /
+`vehicle_freshness` describe upstream observations using the same one-minute
+threshold (the exact boundary remains fresh). Missing or future observation
+times have unavailable freshness. An old feed caps observation freshness at
+stale. Movement is unknown without a fresh, uniquely matched vehicle observation;
+a fresh feed alone cannot establish movement. Trip and vehicle age are independent.
+
+`vehicle_match` is `matched`, `unmatched`, or `ambiguous`. Descriptors must agree
+on every supplied trip ID, route, service date, start time, and direction, with
+exactly one compatible record in each direction. Route filtering happens after
+ambiguity detection. Duplicate descriptors are conservatively ambiguous.
+`start_time` distinguishes repeated instances on the same service date.
+
+Normalized state retains all trip updates with a trip ID, including cancellations,
+deletions, trips with no stops, and stops identified only by sequence. Each stop
+retains its relationship, optional sequence, and separate arrival/departure time,
+delay, uncertainty, and scheduled time. Stops are sorted when all sequences are
+present; otherwise their feed order is retained until static schedules can resolve
+missing sequences. The compact train API skips `SKIPPED` stops, excludes canceled
+or deleted trips and trips without an identified route or next served stop, and retains
+served `NO_DATA` stops with null predictions. Active train metrics use the same
+selection. Observed routes remain known even when every trip is canceled.
+
+Each retained trip carries its feed name, header timestamp, local receipt time,
+trip entity ID, and the matched vehicle entity ID and observation timestamp.
+The API exposes these as `source_name`, `source_timestamp`, `received_at`,
+`entity_id`, `vehicle_entity_id`, and the observation fields above. Full stop and
+cancellation records stay in memory for later station and journey work; they are
+replaced atomically with each valid full feed. Failed refreshes retain them.
+Source names and receipt times are supplied by the loader, not inferred from URLs.
+
 ## Verify
 
 ```sh
