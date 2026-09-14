@@ -1,10 +1,21 @@
-# Hol Up transit API
+# Hol Up
 
 This repository polls all eight anonymous feeds in MTA's Subway Realtime
 catalog, decodes the standard and NYCT GTFS-Realtime schemas, and atomically
 serves each feed independently. This covers every subway route group and the
 Staten Island Railway feed that MTA includes in that catalog; it does not ingest
 bus, LIRR, or Metro-North feeds.
+
+## Web preview
+
+Phase 1 adds a responsive, accessible A-line page with explicit “not connected
+yet” placeholders. Map rendering, station/train requests, polling, and selection
+behavior remain later phases; the browser does not request transit data yet.
+
+See the [web app README](web/README.md) for dependencies and development and
+build commands. In production, the container builds the frontend and the Go
+application serves it with the API on port 8080. `WEB_DIR` defaults to
+`web/dist`; missing frontend output returns UI 404s without blocking the API.
 
 ## Run
 
@@ -263,18 +274,27 @@ rate remain unmeasured until checked against a real archive.
 ## Verify
 
 ```sh
+npm --prefix web ci
+npm --prefix web run typecheck
+npm --prefix web run build
 go test ./...
 go test -race ./...
 go vet ./...
 ./test/container_smoke.sh
 ```
 
-The container build runs the Go tests before producing a non-root runtime
-image. The smoke script uses Docker or Podman, checks liveness, unavailable-data
+The container build runs the Go tests and frontend build before producing a
+non-root runtime image. The smoke script uses Docker or Podman, checks the UI
+HTML and a referenced hashed JavaScript asset, liveness, unavailable-data
 responses, metrics and OpenAPI with unreachable upstreams, and verifies JSON
 startup and SIGTERM shutdown events (requires curl and jq). The Go suite also
 starts the application with a blocked schedule request and confirms realtime
 and HTTP startup continue independently.
+
+For the foundation page, also check desktop and narrow mobile layouts, visible
+keyboard focus, the native line selector, and the skip link moving focus to the
+station section. Check the browser console for errors. The Go serving tests use
+temporary files and run without a frontend build.
 
 For supplementary verification against a locally downloaded MTA ZIP:
 

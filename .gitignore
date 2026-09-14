@@ -1,2 +1,23 @@
-.tools/
-bin/
+# Local tools and Go build/test output
+/.tools/
+/bin/
+*.test
+*.coverprofile
+coverage.out
+*.prof
+
+# Web dependencies and generated output
+/web/node_modules/
+/web/dist/
+/web/coverage/
+
+# Local configuration and logs
+.env
+.env.*
+!.env.example
+*.log
+
+# Editor and operating-system metadata
+.idea/
+.DS_Store
+Thumbs.db

@@ -38,6 +38,11 @@ trap cleanup EXIT INT TERM
 attempt=0
 while [ "$attempt" -lt 20 ]; do
     if curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null; then
+        html=$(curl -fsS "http://127.0.0.1:$port/")
+        printf '%s\n' "$html" | grep -q '<title>Hol Up'
+        asset=$(printf '%s\n' "$html" | sed -n 's|.*src="\(/assets/index-[A-Za-z0-9_-]*\.js\)".*|\1|p')
+        test -n "$asset"
+        test -n "$(curl -fsS "http://127.0.0.1:$port$asset")"
         for path in readyz api/v1/routes 'api/v1/trains?route_id=A' 'api/v1/trains?route_id=A&view=positions' api/v1/routes/A/geometry; do
             test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$path")" = 503
         done

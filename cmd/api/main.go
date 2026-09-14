@@ -100,10 +100,11 @@ func run(logger *slog.Logger) error {
 	}
 	metrics := telemetry.New(names...)
 	coordinator.run("startup")
+	api := httpapi.NewHandler(sources, metrics, time.Now, staleAfter, &coordinator.results)
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
-		Handler:           httpapi.NewHandler(sources, metrics, time.Now, staleAfter, &coordinator.results),
+		Handler:           webHandler(api, env("WEB_DIR", "web/dist")),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       time.Minute,

@@ -209,6 +209,18 @@ Do not introduce Redis solely to connect a future Rust service to Go. Redis Pub/
 
 ## APIs, UI, and Access
 
+### Repository boundary
+
+Keep the Go application and `web/` package in one repository while they form
+one product and production release. Each keeps its own toolchain and build;
+the production image composes their outputs. Move the web app to a separate
+repository only when that creates concrete autonomy: a different owning team
+or access policy, a materially independent release cadence or deployment
+target, or reuse across multiple backends. Separate CI jobs or CDN deployment
+alone do not require a repository split. Before splitting, version the API
+contract and make compatibility tests an explicit cross-repository release
+gate.
+
 ### Public interfaces
 
 - [x] `GET /api/v1/routes`
