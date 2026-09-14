@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"hol-up-prototype/internal/realtime"
+	"hol-up-prototype/internal/reconcile"
 	"hol-up-prototype/internal/telemetry"
 )
 
@@ -21,6 +23,7 @@ type Handler struct {
 	metrics    *telemetry.Store
 	now        func() time.Time
 	staleAfter time.Duration
+	bundles    *reconcile.Store
 }
 
 // Source identifies one independently published realtime feed and the routes
@@ -32,8 +35,8 @@ type Source struct {
 }
 
 // NewHandler constructs the public HTTP handler.
-func NewHandler(sources []Source, metrics *telemetry.Store, now func() time.Time, staleAfter time.Duration) http.Handler {
-	return &Handler{sources: append([]Source(nil), sources...), metrics: metrics, now: now, staleAfter: staleAfter}
+func NewHandler(sources []Source, metrics *telemetry.Store, now func() time.Time, staleAfter time.Duration, bundles *reconcile.Store) http.Handler {
+	return &Handler{sources: append([]Source(nil), sources...), metrics: metrics, now: now, staleAfter: staleAfter, bundles: bundles}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -80,6 +83,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusBadRequest, errorResponse("missing_route_id", "route_id is required"))
 			return
 		}
+		if view := r.URL.Query().Get("view"); view != "" {
+			if view != "positions" {
+				writeJSON(w, http.StatusBadRequest, errorResponse("invalid_view", "view must be positions when supplied"))
+				return
+			}
+			h.positions(w, routeID, now)
+			return
+		}
 		states := h.loadSources(h.sourcesForRoute(routeID), now, true)
 		asOf, freshness, coverage := summarize(states, now, h.staleAfter)
 		matching := make([]realtime.Train, 0)
@@ -112,6 +123,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/metrics":
 		writeMetrics(w, h.loadSources(h.sources, now, false), h.metrics.Snapshot(), now, h.staleAfter)
 	default:
+		if route, ok := strings.CutPrefix(r.URL.Path, "/api/v1/routes/"); ok {
+			if routeID, ok := strings.CutSuffix(route, "/geometry"); ok && routeID != "" && !strings.Contains(routeID, "/") {
+				h.geometry(w, routeID, now)
+				return
+			}
+		}
 		writeJSON(w, http.StatusNotFound, errorResponse("not_found", "endpoint not found"))
 	}
 }

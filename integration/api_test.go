@@ -36,7 +36,7 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 		{Name: "ace", Routes: []string{"A", "C", "E"}, Store: aceStore},
 		{Name: "nqrw", Routes: []string{"N", "Q", "R", "W"}, Store: nqrwStore},
 	}
-	handler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return nqrwTime }, time.Minute)
+	handler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return nqrwTime }, time.Minute, nil)
 	recorder := request(handler, "/api/v1/trains?route_id=A")
 
 	if recorder.Code != http.StatusOK {
@@ -60,7 +60,7 @@ func TestProtobufFeedToTrainsAPI(t *testing.T) {
 		t.Fatalf("N trains status/body = %d/%s", nqrwRecorder.Code, nqrwRecorder.Body.String())
 	}
 
-	staleHandler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return now.Add(61 * time.Second) }, time.Minute)
+	staleHandler := httpapi.NewHandler(sources, telemetry.New(), func() time.Time { return now.Add(61 * time.Second) }, time.Minute, nil)
 	if got := request(staleHandler, "/readyz"); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"coverage":"complete"`) {
 		t.Fatalf("mixed-source readiness = %d/%s, want complete 200", got.Code, got.Body.String())
 	}
@@ -163,7 +163,7 @@ func TestRealtimeSemanticsFromFeedThroughAPI(t *testing.T) {
 			if err := ingest.NewLoader(server.Client(), store, "ace", server.URL, "", 0, func() time.Time { return now }).Load(t.Context()); err != nil {
 				t.Fatal(err)
 			}
-			handler := httpapi.NewHandler([]httpapi.Source{{Name: "ace", Routes: []string{"A"}, Store: store}}, telemetry.New(), func() time.Time { return now }, time.Minute)
+			handler := httpapi.NewHandler([]httpapi.Source{{Name: "ace", Routes: []string{"A"}, Store: store}}, telemetry.New(), func() time.Time { return now }, time.Minute, nil)
 			recorder := request(handler, "/api/v1/trains?route_id=A")
 			var body struct {
 				Trains []map[string]any `json:"trains"`
@@ -243,7 +243,7 @@ func TestCancellationsRemainNormalizedWithoutAppearingAsActiveTrains(t *testing.
 	if _, _, active := store.Status(now, time.Minute); active != 0 {
 		t.Fatalf("active count = %d", active)
 	}
-	handler := httpapi.NewHandler([]httpapi.Source{{Name: "ace", Routes: []string{"A"}, Store: store}, {Name: "g", Routes: []string{"G"}, Store: realtime.NewStore()}}, telemetry.New(), func() time.Time { return now }, time.Minute)
+	handler := httpapi.NewHandler([]httpapi.Source{{Name: "ace", Routes: []string{"A"}, Store: store}, {Name: "g", Routes: []string{"G"}, Store: realtime.NewStore()}}, telemetry.New(), func() time.Time { return now }, time.Minute, nil)
 	recorder := request(handler, "/api/v1/trains?route_id=S")
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"trains":[]`) || !strings.Contains(recorder.Body.String(), `"coverage":"partial"`) {
 		t.Fatalf("cancellation-only observed route = %d/%s", recorder.Code, recorder.Body.String())

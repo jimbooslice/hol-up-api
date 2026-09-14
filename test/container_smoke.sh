@@ -38,7 +38,7 @@ trap cleanup EXIT INT TERM
 attempt=0
 while [ "$attempt" -lt 20 ]; do
     if curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null; then
-        for path in readyz api/v1/routes 'api/v1/trains?route_id=A'; do
+        for path in readyz api/v1/routes 'api/v1/trains?route_id=A' 'api/v1/trains?route_id=A&view=positions' api/v1/routes/A/geometry; do
             test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$path")" = 503
         done
         curl -fsS "http://127.0.0.1:$port/metrics" >/dev/null

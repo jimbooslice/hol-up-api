@@ -22,7 +22,8 @@ func fixtureFiles() map[string]string {
 		"calendar.txt":       "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\ndaily,1,1,1,1,1,1,1,20260101,20261231\n",
 		"calendar_dates.txt": "service_id,date,exception_type\ndaily,20260913,2\n",
 		"feed_info.txt":      "feed_publisher_name,feed_publisher_url,feed_lang,feed_start_date,feed_end_date,feed_version\nMTA,https://www.mta.info,en,20260101,20261231,fixture\n",
-		"shapes.txt":         "unused but checksum-validated\n",
+		"shapes.txt":         "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,shape_dist_traveled\nA..N,40,-73,9,10\nA..N,40.001,-73,5,5\nA..N,40,-73,1,0\n",
+		"unused.txt":         "unused but checksum-validated\n",
 	}
 }
 
@@ -57,6 +58,10 @@ func TestDecodeHeadersTimesAndExceptionOnlyCalendar(t *testing.T) {
 	}
 	if d.Counts().Routes != 2 || d.Agencies()[0].Timezone != schedule.Timezone || d.FeedInfo().Version != "fixture" || d.Active("daily", "20260913") {
 		t.Fatalf("dataset = %+v", d.Counts())
+	}
+	shape, ok := d.Shape("A..N")
+	if !ok || !shape.Usable || len(shape.Points) != 3 || shape.Points[0].Sequence != 1 || shape.Points[2].ShapeDistance.Value != 10 || shape.Points[2].DistanceMeters < 200 {
+		t.Fatalf("shape geometry not retained in sequence order: %+v", shape)
 	}
 	delete(files, "calendar.txt")
 	files["calendar_dates.txt"] = "service_id,date,exception_type\ndaily,20260912,1\n"
@@ -112,6 +117,17 @@ func TestDecodeRejectsInvalidData(t *testing.T) {
 		{"invalid timezone", "agency.txt", "America/New_York", "UTC"},
 		{"invalid direction", "trips.txt", ",0,A..N", ",2,A..N"},
 		{"invalid coordinate", "stops.txt", "40,-73", "NaN,-73"},
+		{"shape missing column", "shapes.txt", "shape_pt_lat", "wrong"},
+		{"shape duplicate key", "shapes.txt", "-73,9,10", "-73,1,10"},
+		{"shape empty ID", "shapes.txt", "A..N,40,-73,9,10", ",40,-73,9,10"},
+		{"shape latitude", "shapes.txt", "40,-73,9,10", "91,-73,9,10"},
+		{"shape longitude", "shapes.txt", "40,-73,9,10", "40,-181,9,10"},
+		{"shape nonfinite coordinate", "shapes.txt", "40,-73,9,10", "NaN,-73,9,10"},
+		{"shape nonfinite distance", "shapes.txt", "-73,9,10", "-73,9,Inf"},
+		{"shape negative distance", "shapes.txt", "-73,9,10", "-73,9,-10"},
+		{"shape decreasing distance", "shapes.txt", "-73,9,10", "-73,9,1"},
+		{"shape negative sequence", "shapes.txt", "-73,9,10", "-73,-1,10"},
+		{"shape overflowing sequence", "shapes.txt", "-73,9,10", "-73,4294967296,10"},
 		{"invalid time", "stop_times.txt", "26:00:00", "26:61:00"},
 		{"decreasing time", "stop_times.txt", "26:00:00", "22:00:00"},
 		{"missing endpoint time", "stop_times.txt", "26:00:00", ""},
@@ -137,6 +153,36 @@ func TestDecodeRejectsInvalidData(t *testing.T) {
 		if _, err := Decode(zipFixture(t, files)); err == nil {
 			t.Errorf("accepted missing %s", name)
 		}
+	}
+}
+
+func TestOptionalGeometryAndStopDistances(t *testing.T) {
+	files := fixtureFiles()
+	files["stop_times.txt"] = "trip_id,stop_id,stop_sequence,arrival_time,departure_time,shape_dist_traveled\nstatic_090000_A..N,S1,1,23:00:00,23:00:00,0\nstatic_090000_A..N,S2,2,26:00:00,26:00:00,10\n"
+	d, err := Decode(zipFixture(t, files))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip, _ := d.Trip("static_090000_A..N")
+	pattern, _ := d.TripPattern(trip.ID)
+	if !trip.Stops[0].ShapeDistance.Present || trip.Stops[1].ShapeDistance.Value != 10 || pattern.Stops[1].Association != "shape_dist_traveled" || !pattern.Stops[1].HasDistance {
+		t.Fatalf("stop distance presence lost: %+v %+v", trip, pattern)
+	}
+	for _, value := range []string{"NaN", "Inf", "-1", "invalid"} {
+		bad := fixtureFiles()
+		bad["stop_times.txt"] = strings.ReplaceAll(files["stop_times.txt"], "26:00:00,10", "26:00:00,"+value)
+		if _, err := Decode(zipFixture(t, bad)); err == nil {
+			t.Fatalf("accepted invalid stop distance %s", value)
+		}
+	}
+	delete(files, "shapes.txt")
+	d, err = Decode(zipFixture(t, files))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pattern, _ = d.TripPattern(trip.ID)
+	if pattern.Reason != "missing_shape" || pattern.Stops[0].HasDistance {
+		t.Fatalf("missing geometry did not retain schedule with a reason: %+v", pattern)
 	}
 }
 

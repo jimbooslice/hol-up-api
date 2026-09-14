@@ -72,10 +72,10 @@ func nyctDirection(value string) realtime.Direction {
 	return realtime.DirectionUnknown
 }
 
-func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset, now time.Time) {
+func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset) {
 	train := m.Train
 	id := parseID(train.TripID)
-	dates := dataset.CandidateServiceDates(now)
+	var dates []schedule.Date
 	if train.ServiceDate != "" {
 		date, err := schedule.ParseDate(train.ServiceDate)
 		if err != nil {
@@ -83,6 +83,22 @@ func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset, now time
 			return
 		}
 		dates = []schedule.Date{date}
+	} else {
+		// Trip observations survive refreshed headers; absent observations use
+		// the retained feed time. Neither can acquire a date from publication.
+		at := m.Reference.Source.SourceTimestamp
+		if train.TripUpdateTimestampPresent || !train.TripUpdateTimestamp.IsZero() {
+			at = train.TripUpdateTimestamp
+			receivedAt := m.Reference.Source.ReceivedAt
+			if receivedAt.IsZero() {
+				receivedAt = m.Reference.Source.SourceTimestamp
+			}
+			if at.IsZero() || at.Unix() <= 0 || at.Year() > 9999 || at.After(receivedAt) {
+				m.Outcome, m.Reason = Invalid, "invalid_trip_update_timestamp"
+				return
+			}
+		}
+		dates = dataset.CandidateServiceDates(at)
 	}
 	var selected []staticTrip
 	if trip, ok := dataset.Trip(train.TripID); ok {
@@ -271,6 +287,51 @@ func resolveStops(updates []realtime.StopPrediction, stops []schedule.StopTime) 
 			out[i].Outcome, out[i].Reason = Invalid, "conflicting_stop_order"
 		}
 		lowest = min(lowest, out[i].ScheduledIndex)
+	}
+	return out
+}
+
+// ResolveStop uses the same occurrence rules for a matched vehicle observation.
+func ResolveStop(update realtime.StopPrediction, stops []schedule.StopTime) StopResolution {
+	return resolveStops([]realtime.StopPrediction{update}, stops)[0]
+}
+
+// MatchRoutes retains conflicting route evidence so each affected route can
+// expose the null outcome. A sole configured route can attribute an otherwise
+// unlocalized source record, but multiple configured routes cannot.
+func (b *Bundle) MatchRoutes(m Match) []string {
+	var routes []string
+	add := func(route string) {
+		if route != "" && !slices.Contains(routes, route) {
+			routes = append(routes, route)
+		}
+	}
+	add(m.Train.RouteID)
+	add(parseID(m.Train.TripID).route)
+	if b != nil && b.version != nil {
+		ids := []string{m.Train.TripID, m.Instance.TripID}
+		for _, candidate := range m.Candidates {
+			ids = append(ids, candidate.TripID)
+		}
+		for _, id := range ids {
+			if trip, ok := b.version.Dataset().Trip(id); ok {
+				add(trip.RouteID)
+			}
+		}
+	}
+	if len(routes) == 0 && len(m.Reference.Source.Routes) == 1 {
+		add(m.Reference.Source.Routes[0])
+	}
+	slices.Sort(routes)
+	return routes
+}
+
+func (b *Bundle) RouteMatches(routeID string) []Match {
+	var out []Match
+	for _, match := range b.Matches() {
+		if slices.Contains(b.MatchRoutes(match), routeID) {
+			out = append(out, match)
+		}
 	}
 	return out
 }

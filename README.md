@@ -13,6 +13,8 @@ go run -buildvcs=false ./cmd/api
 curl http://localhost:8080/healthz
 curl http://localhost:8080/readyz
 curl 'http://localhost:8080/api/v1/trains?route_id=A'
+curl http://localhost:8080/api/v1/routes/A/geometry
+curl 'http://localhost:8080/api/v1/trains?route_id=A&view=positions'
 ```
 
 `ADDR` overrides the listen address. Feed URLs can be overridden independently:
@@ -67,7 +69,8 @@ Source-unavailable errors include the same coverage and source details as
 successful responses.
 
 Available endpoints are `GET /healthz`, `/readyz`, `/metrics`,
-`/api/v1/routes`, `/api/v1/trains?route_id=A` (or another returned route), and
+`/api/v1/routes`, `/api/v1/trains?route_id=A` (or another returned route),
+`/api/v1/routes/A/geometry`, `/api/v1/trains?route_id=A&view=positions`, and
 `/openapi.yaml`. Open `http://localhost:8080/openapi.yaml` in a browser or
 pass it to an OpenAPI viewer for the complete API contract.
 
@@ -120,7 +123,8 @@ Source names and receipt times are supplied by the loader, not inferred from URL
 ## Static schedules
 
 Static subway schedules are also loaded independently at startup and hourly.
-They remain internal; realtime endpoints and readiness retain their existing behavior.
+Geometry and the positions view consume their immutable reconciliation bundles;
+the compact realtime view and readiness retain their existing behavior.
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -167,8 +171,9 @@ limits both declared and actual total output to 512 MiB, each entry to 256 MiB,
 and the archive to 64 entries. Each raw logical CSV record, including quoted
 multiline fields, is bounded to 1 MiB before CSV decoding. Files are read directly
 from the archive; duplicate filenames, nested paths, malformed archives, checksum
-failures (including unused files), and exceeded limits are rejected. Shape and
-journey processing remain deferred.
+failures (including unused files), and exceeded limits are rejected. Shapes and
+optional shape distances are validated with the same bounded parser. Journey
+processing remains deferred.
 
 The cache uses a small load/save interface and one JSON envelope containing
 metadata and archive bytes. A private temporary file is synced and atomically
@@ -190,9 +195,9 @@ Internal reconciliation now publishes immutable schedule/source bundles after
 each successful realtime or schedule publication, including cache restoration
 and unchanged-content renewal. It records exact/MTA identity matches, ambiguous
 and invalid candidates, stop associations, and validated NYCT replacement rules.
-Fallback lookups recheck freshness and eligibility; HTTP responses and readiness
-retain their existing behavior. Public schedule APIs and fallback rendering are
-deferred. See [reconciliation decisions](ARCHITECTURE_PLAN.md#internal-reconciliation-decisions).
+Fallback lookups retain their existing suppression contract. A separate
+`SimulationDecision` authorizes positions using retained complete source evidence
+and the captured schedule. Compact responses and readiness retain their behavior. See [reconciliation decisions](ARCHITECTURE_PLAN.md#internal-reconciliation-decisions).
 
 `LOG_LEVEL` defaults to `INFO`; case-insensitive `DEBUG`, `INFO`, `WARN`, and
 `ERROR` are accepted. Invalid values stop startup without echoing the value.
@@ -200,7 +205,60 @@ deferred. See [reconciliation decisions](ARCHITECTURE_PLAN.md#internal-reconcili
 source provenance, outcome counts, and duration. `reconciliation_trip` DEBUG
 events explain identifiers, selected rules, candidates, and rejection reasons.
 The offline [A-line ZIP/protobuf fixture](test/fixtures/reconcile/README.md)
-exercises ingestion through reconciliation.
+exercises ingestion, reconciliation, geometry, and position responses.
+
+## Geometry and train positions
+
+`GET /api/v1/routes/A/geometry` returns canonical station Point features, shape
+LineString features, and patterns with ordered platform/station occurrences.
+GeoJSON coordinates are `[longitude, latitude]`; branches have separate patterns.
+Shapes and stop anchors belong to the immutable schedule version. Missing or
+unusable geometry carries explicit reasons. No loaded schedule returns
+`503 schedule_unavailable`; an unknown route in a loaded schedule returns `404`.
+Expired geometry remains inspectable with `schedule_eligible: false`.
+
+`GET /api/v1/trains?route_id=A&view=positions` returns every route-attributable
+trip update, including unidentified, canceled, ambiguous, and unprojectable
+records, plus authorized active scheduled runs without counterparts. Standalone
+vehicle entities are outside this view. Coordinates follow the trip's polyline
+and never imply GPS observation. Predictions interpolate only within supported
+time intervals; a single next-arrival prediction can use the scheduled segment
+duration, labeled `next_prediction_schedule_duration`. Fresh uniquely matched
+vehicle stop evidence can establish `reported_stopped`; predicted dwell cannot.
+
+`trip_id`, `service_date`, and `trip_instance_id` are nullable scheduled identity;
+`realtime_trip_id`, `realtime_service_date`, and `source_record_id` preserve the
+independent input record.
+The stable run ID deterministically encodes the static trip and service date.
+Source, observation, and schedule timestamps and ages remain separate. Both
+coordinates are null with `no_position_reason` whenever projection is unsupported.
+A fresh record without geometry or timing stays null.
+
+A stale uniquely matched run may switch to `position_basis: schedule_fallback`
+under its existing run identity, retaining stale realtime provenance. Simulation
+uses `movement_state: unknown` and requires an eligible schedule, active service,
+one configured owner, and a previously loaded complete snapshot with usable
+metadata. Cancellations and uncertain associations remain vetoes after staleness.
+Absent runs remain suppressed inside retained replacement windows even after
+departure or freshness expiry; a uniquely matched retained run counts as present.
+Simulation runs only from scheduled first departure through final arrival and
+ends when schedule eligibility expires (default maximum age: 24 hours).
+No separate outage timer or schedule stretching is used.
+
+Each request captures one bundle and evaluation time. Geometry and positions both
+carry `schedule_version`; refetch geometry on mismatch. Clients restart
+interpolation after missing/null or ambiguous outcomes, changed trip, pattern,
+direction or geometry, and transitions between realtime and simulation. The
+server keeps no animation history and performs no nearest-position identity join.
+Relevant sources that never loaded return structured `503` responses. Loaded
+realtime without a schedule returns explicit null outcomes. Readiness is unchanged.
+
+The shape-aware parser schema invalidates older caches. An upgrade with only an
+old-schema cache needs a new successful schedule fetch before geometry is
+available; restoring archive bytes never renews cached validation time. No new
+worker, store, dependency, or station-search endpoint is added. Synthetic fixtures
+establish correctness, while live A-line alignment quality and projection success
+rate remain unmeasured until checked against a real archive.
 
 ## Verify
 

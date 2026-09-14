@@ -210,6 +210,7 @@ func TestStoreCopiesCompleteStopStateAndRetainsCancellations(t *testing.T) {
 	next := Snapshot{SourceName: "ace", SourceTimestamp: now, ReceivedAt: now.Add(time.Second), Trains: []Train{{
 		EntityID: "cancellation", TripID: "trip", StartTime: "12:00:00", ScheduleRelationship: "CANCELED",
 		TripDelaySeconds: new(int32(20)), PredictionDelaySeconds: new(int32(10)),
+		VehicleStopSequence: new(uint32(7)), VehicleStatus: "STOPPED_AT", VehicleStopID: "A01N",
 		Stops: []StopPrediction{{StopID: "A01N", Sequence: new(uint32(1)), Relationship: StopSkipped,
 			Arrival:   &StopEvent{Time: now, DelaySeconds: new(int32(10)), Uncertainty: new(int32(2))},
 			Departure: &StopEvent{Time: now.Add(time.Minute), DelaySeconds: new(int32(15)), Uncertainty: new(int32(3))},
@@ -221,6 +222,7 @@ func TestStoreCopiesCompleteStopStateAndRetainsCancellations(t *testing.T) {
 	mutate := func(snapshot Snapshot) {
 		trip := &snapshot.Trains[0]
 		*trip.TripDelaySeconds, *trip.PredictionDelaySeconds = 99, 99
+		*trip.VehicleStopSequence = 99
 		stop := &trip.Stops[0]
 		stop.StopID, *stop.Sequence = "changed", 99
 		stop.Arrival.Time, *stop.Arrival.DelaySeconds, *stop.Arrival.Uncertainty = time.Time{}, 99, 99
@@ -229,6 +231,9 @@ func TestStoreCopiesCompleteStopStateAndRetainsCancellations(t *testing.T) {
 	mutate(next)
 	mutate(store.Load(now, time.Minute))
 	trip := store.Load(now, time.Minute).Trains[0]
+	if *trip.VehicleStopSequence != 7 {
+		t.Fatal("vehicle occurrence mutated through snapshot")
+	}
 	stop := trip.Stops[0]
 	if !trip.Canceled() || trip.NextServedStop() != nil || trip.StartTime != "12:00:00" || trip.SourceName != "ace" || !trip.ReceivedAt.Equal(now.Add(time.Second)) || *trip.TripDelaySeconds != 20 || *trip.PredictionDelaySeconds != 10 {
 		t.Fatalf("retained trip = %+v", trip)

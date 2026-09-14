@@ -70,11 +70,37 @@ func TestDecodePairsTripAndVehicle(t *testing.T) {
 	if train.MovementState != realtime.MovementStateReportedStopped {
 		t.Fatalf("movement state = %q, want reported_stopped", train.MovementState)
 	}
+	if train.TripUpdateTimestampPresent || !train.VehicleTimestampPresent || train.VehicleStatus != "STOPPED_AT" || train.VehicleStopID != "A11S" || train.VehicleStopSequence == nil || *train.VehicleStopSequence != 12 {
+		t.Fatalf("projection evidence was not retained: %+v", train)
+	}
 	if train.DirectionID != nil || train.Direction != realtime.DirectionSouthbound {
 		t.Fatalf("direction = %v/%q, want nil/southbound", train.DirectionID, train.Direction)
 	}
 	if (train.PredictionDelaySeconds == nil || *train.PredictionDelaySeconds != 45) || !train.PredictedAt.Equal(sourceTime.Add(2*time.Minute)) {
 		t.Fatalf("prediction = %s/%v, want +2m/45", train.PredictedAt, train.PredictionDelaySeconds)
+	}
+}
+
+func TestDecodePreservesInvalidObservationPresence(t *testing.T) {
+	for _, value := range []*uint64{nil, proto.Uint64(0), proto.Uint64(1 << 63)} {
+		update := tripUpdateEntity("update", "trip-a", "A", "A01N")
+		update.TripUpdate.Timestamp = value
+		feed := &gtfs.FeedMessage{Header: &gtfs.FeedHeader{GtfsRealtimeVersion: proto.String("2.0"), Timestamp: proto.Uint64(1000)}, Entity: []*gtfs.FeedEntity{update}}
+		snapshot, err := Decode(mustMarshal(t, feed), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := snapshot.Trains[0]
+		freshness, basis := got.PredictionFreshnessAt(snapshot.SourceTimestamp, time.Unix(1000, 0), time.Minute)
+		if got.TripUpdateTimestampPresent != (value != nil) {
+			t.Fatal("lost optional timestamp presence")
+		}
+		if value == nil && (freshness != realtime.FreshnessFresh || basis != "feed_header") {
+			t.Fatalf("omitted = %s/%s", freshness, basis)
+		}
+		if value != nil && (freshness != realtime.FreshnessUnavailable || basis != "invalid_trip_update_timestamp") {
+			t.Fatalf("invalid = %s/%s", freshness, basis)
+		}
 	}
 }
 

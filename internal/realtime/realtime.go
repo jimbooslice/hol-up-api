@@ -66,6 +66,7 @@ const (
 // time means omitted; an explicit Unix epoch is a nonzero time.Time.
 type StopEvent struct {
 	Time          time.Time
+	TimePresent   bool
 	DelaySeconds  *int32
 	Uncertainty   *int32
 	ScheduledTime time.Time
@@ -83,33 +84,38 @@ type StopPrediction struct {
 // Train retains a complete trip update, including canceled trips and stops
 // without predictions. Compact next-stop fields are derived from Stops.
 type Train struct {
-	EntityID               string
-	RouteID                string
-	TripID                 string
-	ServiceDate            string
-	StartTime              string
-	ScheduleRelationship   string
-	Stops                  []StopPrediction
-	TripDelaySeconds       *int32
-	NYCTDirection          *Direction // Supplied extension value, never inferred from a stop.
-	DirectionID            *uint32
-	Direction              Direction
-	NextStopID             string
-	NextStopSequence       uint32
-	PredictedAt            time.Time
-	PredictionDelaySeconds *int32
-	PositionBasis          PositionBasis
-	MovementState          MovementState
-	Freshness              Freshness
-	SourceTimestamp        time.Time
-	SourceName             string
-	ReceivedAt             time.Time
-	TripUpdateTimestamp    time.Time
-	TripUpdateFreshness    Freshness
-	VehicleEntityID        string
-	VehicleTimestamp       time.Time
-	VehicleFreshness       Freshness
-	VehicleMatch           VehicleMatch
+	EntityID                   string
+	RouteID                    string
+	TripID                     string
+	ServiceDate                string
+	StartTime                  string
+	ScheduleRelationship       string
+	Stops                      []StopPrediction
+	TripDelaySeconds           *int32
+	NYCTDirection              *Direction // Supplied extension value, never inferred from a stop.
+	DirectionID                *uint32
+	Direction                  Direction
+	NextStopID                 string
+	NextStopSequence           uint32
+	PredictedAt                time.Time
+	PredictionDelaySeconds     *int32
+	PositionBasis              PositionBasis
+	MovementState              MovementState
+	Freshness                  Freshness
+	SourceTimestamp            time.Time
+	SourceName                 string
+	ReceivedAt                 time.Time
+	TripUpdateTimestamp        time.Time
+	TripUpdateTimestampPresent bool
+	TripUpdateFreshness        Freshness
+	VehicleEntityID            string
+	VehicleTimestamp           time.Time
+	VehicleTimestampPresent    bool
+	VehicleStopID              string
+	VehicleStopSequence        *uint32
+	VehicleStatus              string
+	VehicleFreshness           Freshness
+	VehicleMatch               VehicleMatch
 }
 
 func (t Train) Canceled() bool {
@@ -241,8 +247,8 @@ func (s *Store) Load(now time.Time, staleAfter time.Duration) Snapshot {
 	result.Freshness = FreshnessAt(result.SourceTimestamp, now, staleAfter)
 	for index := range result.Trains {
 		result.Trains[index].Freshness = FreshnessAt(result.Trains[index].SourceTimestamp, now, staleAfter)
-		result.Trains[index].TripUpdateFreshness = observationFreshness(result.Trains[index].TripUpdateTimestamp, result.Trains[index].Freshness, now, staleAfter)
-		result.Trains[index].VehicleFreshness = observationFreshness(result.Trains[index].VehicleTimestamp, result.Trains[index].Freshness, now, staleAfter)
+		result.Trains[index].TripUpdateFreshness = ObservationFreshness(result.Trains[index].TripUpdateTimestamp, result.Trains[index].Freshness, now, staleAfter)
+		result.Trains[index].VehicleFreshness = ObservationFreshness(result.Trains[index].VehicleTimestamp, result.Trains[index].Freshness, now, staleAfter)
 		// A stale stop observation cannot describe the train's current movement.
 		if result.Trains[index].VehicleFreshness != FreshnessFresh || result.Trains[index].Canceled() {
 			result.Trains[index].MovementState = MovementStateUnknown
@@ -260,7 +266,7 @@ func (s *Store) Status(now time.Time, staleAfter time.Duration) (time.Time, Fres
 	return current.SourceTimestamp, FreshnessAt(current.SourceTimestamp, now, staleAfter), current.activeTrains
 }
 
-func observationFreshness(observedAt time.Time, feedFreshness Freshness, now time.Time, staleAfter time.Duration) Freshness {
+func ObservationFreshness(observedAt time.Time, feedFreshness Freshness, now time.Time, staleAfter time.Duration) Freshness {
 	// Future observations cannot establish current movement or prediction age.
 	if observedAt.IsZero() || observedAt.After(now) {
 		return FreshnessUnavailable
@@ -269,6 +275,35 @@ func observationFreshness(observedAt time.Time, feedFreshness Freshness, now tim
 		return feedFreshness
 	}
 	return FreshnessAt(observedAt, now, staleAfter)
+}
+
+// PredictionFreshnessAt allows an omitted optional timestamp to use the feed
+// header. A supplied but unusable observation never becomes an absent one.
+func (t Train) PredictionFreshnessAt(feedTimestamp, now time.Time, staleAfter time.Duration) (Freshness, string) {
+	feed := FreshnessAt(feedTimestamp, now, staleAfter)
+	if !t.TripUpdateTimestampPresent && t.TripUpdateTimestamp.IsZero() {
+		return feed, "feed_header"
+	}
+	if t.TripUpdateTimestamp.IsZero() || t.TripUpdateTimestamp.Unix() <= 0 || t.TripUpdateTimestamp.Year() > 9999 || t.TripUpdateTimestamp.After(now) {
+		return FreshnessUnavailable, "invalid_trip_update_timestamp"
+	}
+	return ObservationFreshness(t.TripUpdateTimestamp, feed, now, staleAfter), "trip_update"
+}
+
+// EventTime gives an absolute prediction precedence over supplied delays.
+// A zero scheduled instant means the static event was omitted.
+func EventTime(event *StopEvent, tripDelay *int32, scheduled time.Time) (time.Time, string, bool) {
+	if event != nil && (event.TimePresent || !event.Time.IsZero()) {
+		return event.Time, "realtime_events", !event.Time.IsZero() && event.Time.Unix() > 0 && event.Time.Year() <= 9999
+	}
+	delay := tripDelay
+	if event != nil && event.DelaySeconds != nil {
+		delay = event.DelaySeconds
+	}
+	if delay != nil && !scheduled.IsZero() {
+		return scheduled.Add(time.Duration(*delay) * time.Second), "delay_derived", true
+	}
+	return time.Time{}, "", true
 }
 
 // FreshnessAt classifies a source timestamp. A non-positive staleAfter leaves
@@ -304,6 +339,7 @@ func cloneTrains(trains []Train) []Train {
 }
 
 func (train Train) Clone() Train {
+	train.VehicleStopSequence = clonePointer(train.VehicleStopSequence)
 	train.DirectionID = clonePointer(train.DirectionID)
 	train.NYCTDirection = clonePointer(train.NYCTDirection)
 	train.TripDelaySeconds = clonePointer(train.TripDelaySeconds)

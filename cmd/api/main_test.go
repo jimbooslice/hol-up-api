@@ -117,7 +117,7 @@ func TestRefreshPublishesAvailableFeedAtStartup(t *testing.T) {
 	if _, freshness, _ := feeds[1].store.Status(base, time.Minute); freshness != realtime.FreshnessUnavailable {
 		t.Fatalf("N/Q/R/W freshness = %q, want unavailable", freshness)
 	}
-	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute)
+	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute, nil)
 	if recorder := apiRequest(handler, "/api/v1/trains?route_id=A"); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"coverage":"complete"`) {
 		t.Fatalf("partial A API = %d/%s", recorder.Code, recorder.Body.String())
 	}
@@ -208,7 +208,7 @@ func TestRefreshPublishesFastFeedBeforeSlowFeedCompletes(t *testing.T) {
 		t.Fatal("refresh completed while slow feed was blocked")
 	default:
 	}
-	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute)
+	handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return base }, time.Minute, nil)
 	if recorder := apiRequest(handler, "/api/v1/trains?route_id=A"); recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"coverage":"complete"`) {
 		t.Fatalf("fast-feed API status = %d/%s", recorder.Code, recorder.Body.String())
 	}
@@ -675,7 +675,7 @@ func TestRefreshFutureTimestampRecoveryAndWarnings(t *testing.T) {
 					t.Fatal("future rejection restarted existing outage")
 				}
 			}
-			handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return now }, staleAfter)
+			handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return now }, staleAfter, nil)
 			if got := feeds[0].store.Load(now, staleAfter); got.Freshness != realtime.FreshnessStale {
 				t.Fatalf("retained freshness = %s", got.Freshness)
 			}
@@ -785,7 +785,7 @@ func TestRefreshFutureOnlyStartupAndHealthySibling(t *testing.T) {
 				t.Fatalf("startup metrics = %+v", got)
 			}
 			now := base
-			handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return now }, staleAfter)
+			handler := httpapi.NewHandler(feedSources(feeds), metrics, func() time.Time { return now }, staleAfter, nil)
 			wantStatus := http.StatusServiceUnavailable
 			if healthySibling {
 				wantStatus = http.StatusOK

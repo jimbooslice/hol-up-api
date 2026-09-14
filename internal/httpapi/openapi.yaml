@@ -1,8 +1,8 @@
 openapi: 3.1.1
 info:
   title: Hol Up transit API
-  version: 1.2.0
-  description: Realtime service from all eight feeds in MTA's Subway Realtime catalog, including Staten Island Railway.
+  version: 1.3.0
+  description: Realtime service from all eight feeds in MTA's Subway Realtime catalog, including Staten Island Railway; immutable route geometry and explicitly labeled inferred train positions.
 paths:
   /healthz:
     get:
@@ -44,7 +44,13 @@ paths:
           $ref: '#/components/responses/SourceUnavailable'
   /api/v1/trains:
     get:
-      summary: List realtime trains for a route
+      summary: List compact realtime trains or complete position outcomes for a route
+      description: >-
+        Omit view to preserve compact selection. The positions view includes every
+        route-attributable trip update, including unidentified, canceled, ambiguous,
+        and unprojectable records, plus authorized scheduled runs. Standalone
+        vehicle entities are outside this view. It captures one schedule/realtime
+        bundle and one evaluation time; null coordinates always have a reason.
       parameters:
         - name: route_id
           in: query
@@ -53,21 +59,75 @@ paths:
           schema:
             type: string
           example: W
+        - name: view
+          in: query
+          required: false
+          description: Select the complete position outcome contract; omit for the compact response.
+          schema:
+            type: string
+            enum: [positions]
+          example: positions
       responses:
         '200':
           description: Realtime trains for the requested route. An empty list is valid only when every relevant source has loaded.
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/Trains'
+                anyOf:
+                  - $ref: '#/components/schemas/Trains'
+                  - $ref: '#/components/schemas/Positions'
+              examples:
+                unavailableGeometry:
+                  $ref: '#/components/examples/PositionsWithoutSchedule'
+                realtime:
+                  $ref: '#/components/examples/RealtimePositions'
+                staleSimulation:
+                  $ref: '#/components/examples/StaleSchedulePositions'
         '400':
-          description: route_id was omitted.
+          description: route_id was omitted or view is unsupported.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
           $ref: '#/components/responses/SourceUnavailable'
+  /api/v1/routes/{route_id}/geometry:
+    get:
+      summary: Canonical stations, route shapes, and ordered service patterns
+      description: >-
+        Geometry belongs to one immutable schedule version. GeoJSON coordinates
+        are longitude then latitude. Stop order belongs to each service pattern,
+        including branches and repeated occurrences. Retained ineligible geometry
+        remains inspectable. Refetch on a positions schedule_version mismatch.
+      parameters:
+        - name: route_id
+          in: path
+          required: true
+          schema:
+            type: string
+          example: A
+      responses:
+        '200':
+          description: Route geometry with schedule eligibility and per-pattern anchor reasons.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RouteGeometry'
+              examples:
+                bentRoute:
+                  $ref: '#/components/examples/RouteGeometry'
+        '404':
+          description: The loaded schedule does not contain this route.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: No schedule has loaded (schedule_unavailable).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /metrics:
     get:
       summary: Prometheus-compatible aggregate and per-feed realtime metrics
@@ -298,3 +358,704 @@ components:
               type: array
               items:
                 $ref: '#/components/schemas/Source'
+    RouteGeometry:
+      type: object
+      required:
+      - schedule_version
+      - schedule_eligible
+      - schedule_source
+      - schedule_validated_at
+      - schedule_age_seconds
+      - route_id
+      - short_name
+      - long_name
+      - stations
+      - shapes
+      - patterns
+      properties:
+        schedule_version: &id006
+          type: &id003
+          - string
+          - 'null'
+          description: Immutable source/parser-schema/archive identity; null without a schedule.
+        schedule_eligible: &id007
+          type: boolean
+        schedule_source: &id008
+          type: string
+          enum:
+          - supplemented
+          - regular
+          - ''
+        schedule_validated_at: &id009
+          $ref: '#/components/schemas/Timestamp'
+        schedule_age_seconds: &id005
+          type:
+          - number
+          - 'null'
+        route_id: &id001
+          type: string
+        short_name: *id001
+        long_name: *id001
+        stations:
+          type: array
+          items:
+            $ref: '#/components/schemas/StationFeature'
+        shapes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ShapeFeature'
+        patterns:
+          type: array
+          items:
+            $ref: '#/components/schemas/ServicePattern'
+    PointGeometry:
+      type: object
+      required:
+      - type
+      - coordinates
+      properties:
+        type:
+          const: Point
+        coordinates: &id002
+          type: array
+          items:
+            type: number
+          minItems: 2
+          maxItems: 2
+          description: Longitude then latitude.
+    LineGeometry:
+      type: object
+      required:
+      - type
+      - coordinates
+      properties:
+        type:
+          const: LineString
+        coordinates:
+          type: array
+          items: *id002
+          minItems: 2
+    StationFeature:
+      type: object
+      required:
+      - type
+      - id
+      - geometry
+      - properties
+      properties:
+        type:
+          const: Feature
+        id: *id001
+        geometry:
+          oneOf:
+          - $ref: '#/components/schemas/PointGeometry'
+          - type: 'null'
+        properties:
+          type: object
+          required:
+          - name
+          - reason
+          properties:
+            name: *id001
+            reason: &id004
+              type: *id003
+    ShapeFeature:
+      type: object
+      required:
+      - type
+      - id
+      - geometry
+      - properties
+      properties:
+        type:
+          const: Feature
+        id: *id001
+        geometry:
+          oneOf:
+          - $ref: '#/components/schemas/LineGeometry'
+          - type: 'null'
+        properties:
+          type: object
+          required:
+          - usable
+          - reason
+          properties:
+            usable:
+              type: boolean
+            reason: *id004
+    StopOccurrence:
+      type: object
+      required:
+      - stop_id
+      - station_id
+      - stop_sequence
+      - distance_meters
+      - association
+      - reason
+      properties:
+        stop_id: *id001
+        station_id: *id001
+        stop_sequence:
+          type: integer
+          minimum: 0
+        distance_meters: *id005
+        association: *id001
+        reason: *id004
+    ServicePattern:
+      type: object
+      required:
+      - service_pattern_id
+      - route_id
+      - shape_id
+      - direction_id
+      - stops
+      - reason
+      properties:
+        service_pattern_id: *id001
+        route_id: *id001
+        shape_id: *id004
+        direction_id:
+          type:
+          - integer
+          - 'null'
+          enum:
+          - 0
+          - 1
+          - null
+        stops:
+          type: array
+          items:
+            $ref: '#/components/schemas/StopOccurrence'
+        reason: *id004
+      description: Pattern identity excludes timetable times; ordered occurrences preserve platform IDs and
+        canonical station IDs.
+    Positions:
+      type: object
+      required:
+      - schedule_version
+      - schedule_eligible
+      - schedule_source
+      - schedule_validated_at
+      - schedule_age_seconds
+      - as_of
+      - projected_at
+      - bundle_evaluated_at
+      - freshness
+      - coverage
+      - sources
+      - trains
+      properties:
+        schedule_version: *id006
+        schedule_eligible: *id007
+        schedule_source: *id008
+        schedule_validated_at: *id009
+        schedule_age_seconds: *id005
+        as_of:
+          $ref: '#/components/schemas/Timestamp'
+        projected_at:
+          $ref: '#/components/schemas/Timestamp'
+        bundle_evaluated_at:
+          $ref: '#/components/schemas/Timestamp'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+        coverage:
+          $ref: '#/components/schemas/Coverage'
+        sources:
+          type: array
+          items:
+            $ref: '#/components/schemas/Source'
+        trains:
+          type: array
+          items:
+            $ref: '#/components/schemas/Position'
+      description: One captured bundle and evaluation time. Stale matched runs and absent runs simulate only
+        when reconciliation authorizes them from eligible schedule and retained complete metadata. Cancellations/uncertainty
+        remain vetoes. Retained replacement windows suppress absent runs after departure and freshness expiry.
+        Simulations stop at scheduled final arrival or schedule expiry; readiness is unchanged.
+    Position:
+      type: object
+      required:
+      - route_id
+      - direction
+      - direction_id
+      - trip_id
+      - service_date
+      - trip_instance_id
+      - realtime_trip_id
+      - realtime_service_date
+      - source_record_id
+      - source_name
+      - entity_id
+      - source_index
+      - vehicle_entity_id
+      - vehicle_match
+      - shape_id
+      - service_pattern_id
+      - schedule_version
+      - latitude
+      - longitude
+      - projected_at
+      - position_basis
+      - movement_state
+      - source_timestamp
+      - source_age_seconds
+      - received_at
+      - trip_update_timestamp
+      - trip_update_timestamp_present
+      - trip_update_freshness
+      - vehicle_timestamp
+      - vehicle_timestamp_present
+      - vehicle_freshness
+      - freshness
+      - observation_time
+      - observation_age_seconds
+      - observation_basis
+      - schedule_validated_at
+      - schedule_age_seconds
+      - interpolation_method
+      - reconciliation_outcome
+      - reconciliation_reason
+      - fallback_reason
+      - no_position_reason
+      properties:
+        route_id: *id001
+        direction:
+          type: string
+          enum:
+          - northbound
+          - eastbound
+          - southbound
+          - westbound
+          - unknown
+        direction_id:
+          type:
+          - integer
+          - 'null'
+          enum:
+          - 0
+          - 1
+          - null
+        trip_id:
+          type: *id003
+          description: Static trip ID only when uniquely reconciled; unlike the compact view, this is not
+            the realtime trip ID.
+        service_date:
+          type: *id003
+          description: Scheduled service date in YYYYMMDD format.
+        trip_instance_id:
+          type: *id003
+          description: Base64url encoding of the JSON tuple [static trip ID, service date], stable across
+            polls and realtime/simulation transitions; absent for uncertain identity.
+        realtime_trip_id: *id001
+        realtime_service_date:
+          type: string
+          description: Original realtime service date, retained independently of nullable scheduled identity.
+        source_record_id:
+          type: *id003
+          description: Distinct source/entity/index record identifier. Never use it as a guessed scheduled
+            identity. Null for an added scheduled outcome.
+        source_name: *id001
+        entity_id: *id001
+        source_index:
+          type: integer
+        vehicle_entity_id: *id001
+        vehicle_match:
+          type: string
+          enum:
+          - matched
+          - unmatched
+          - ambiguous
+        shape_id: *id004
+        service_pattern_id: *id004
+        schedule_version: *id004
+        latitude:
+          type:
+          - number
+          - 'null'
+          minimum: -90
+          maximum: 90
+        longitude:
+          type:
+          - number
+          - 'null'
+          minimum: -180
+          maximum: 180
+        projected_at:
+          $ref: '#/components/schemas/Timestamp'
+        position_basis:
+          type: string
+          enum:
+          - realtime_prediction
+          - schedule_fallback
+          description: Inference basis, never GPS-observed. Stale matched simulations retain run identity
+            and realtime provenance.
+        movement_state:
+          type: string
+          enum:
+          - inferred_moving
+          - reported_stopped
+          - unknown
+          description: Only fresh unique vehicle evidence establishes reported_stopped; simulation always
+            uses unknown.
+        source_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        source_age_seconds: *id005
+        received_at:
+          $ref: '#/components/schemas/Timestamp'
+        trip_update_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        trip_update_timestamp_present:
+          type: boolean
+        trip_update_freshness:
+          $ref: '#/components/schemas/Freshness'
+          description: Effective prediction freshness. An absent trip timestamp may use feed-header age, explicitly identified by observation_basis.
+        vehicle_timestamp:
+          $ref: '#/components/schemas/Timestamp'
+        vehicle_timestamp_present:
+          type: boolean
+        vehicle_freshness:
+          $ref: '#/components/schemas/Freshness'
+        freshness:
+          $ref: '#/components/schemas/Freshness'
+          description: Feed freshness independently of projection success or schedule age.
+        observation_time:
+          $ref: '#/components/schemas/Timestamp'
+        observation_age_seconds: *id005
+        observation_basis:
+          type: string
+          description: Identifies observation timing, including feed_header when the optional trip timestamp
+            was absent; malformed/future timestamps cannot use that absence rule.
+        schedule_validated_at:
+          $ref: '#/components/schemas/Timestamp'
+        schedule_age_seconds: *id005
+        interpolation_method:
+          type: string
+          description: Explicit interpolation method, including next_prediction_schedule_duration for a preceding
+            departure estimated from scheduled segment duration.
+        reconciliation_outcome:
+          type: string
+          enum:
+          - matched
+          - unmatched
+          - invalid
+          - ambiguous
+          - unavailable
+        reconciliation_reason: *id001
+        fallback_reason: *id004
+        no_position_reason:
+          type: *id003
+          description: Non-null whenever latitude/longitude are null. Cancellation/identity/authority failures
+            precede geometry and timing failures.
+      description: One retained realtime record or an authorized scheduled run. Both coordinates are present
+        or both null. Fresh geometry/timing failure stays null. No extrapolation beyond supported timing intervals.
+        Clients restart interpolation on missing/null outcomes, ambiguity, changed trip/path/direction/geometry,
+        or transitions between realtime and simulation; no server track history or nearest-position joins.
+  examples:
+    RouteGeometry:
+      summary: "Synthetic bent A-line geometry (distances illustrative)."
+      value: {
+        "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schedule_eligible": true,
+        "schedule_source": "supplemented",
+        "schedule_validated_at": "2026-09-13T04:09:00Z",
+        "schedule_age_seconds": 60,
+        "route_id": "A",
+        "short_name": "A",
+        "long_name": "",
+        "stations": [
+          {
+            "type": "Feature",
+            "id": "A02",
+            "geometry": {
+              "type": "Point",
+              "coordinates": [
+                -73.9,
+                40.8
+              ]
+            },
+            "properties": {
+              "name": "First station",
+              "reason": null
+            }
+          },
+          {
+            "type": "Feature",
+            "id": "A03",
+            "geometry": {
+              "type": "Point",
+              "coordinates": [
+                -74,
+                40.7
+              ]
+            },
+            "properties": {
+              "name": "Second station",
+              "reason": null
+            }
+          }
+        ],
+        "shapes": [
+          {
+            "type": "Feature",
+            "id": "a-south",
+            "geometry": {
+              "type": "LineString",
+              "coordinates": [
+                [
+                  -73.9,
+                  40.8
+                ],
+                [
+                  -74,
+                  40.8
+                ],
+                [
+                  -74,
+                  40.7
+                ]
+              ]
+            },
+            "properties": {
+              "usable": true,
+              "reason": null
+            }
+          }
+        ],
+        "patterns": [
+          {
+            "service_pattern_id": "example-pattern",
+            "route_id": "A",
+            "shape_id": "a-south",
+            "direction_id": 1,
+            "stops": [
+              {
+                "stop_id": "A02S",
+                "station_id": "A02",
+                "stop_sequence": 1,
+                "distance_meters": 0,
+                "association": "shape_dist_traveled",
+                "reason": null
+              },
+              {
+                "stop_id": "A03S",
+                "station_id": "A03",
+                "stop_sequence": 2,
+                "distance_meters": 19537,
+                "association": "shape_dist_traveled",
+                "reason": null
+              }
+            ],
+            "reason": null
+          }
+        ]
+      }
+    PositionsWithoutSchedule:
+      summary: "A retained trip update with explicit null coordinates while the schedule is unavailable."
+      value: {
+        "schedule_version": null,
+        "schedule_eligible": false,
+        "schedule_source": "",
+        "schedule_validated_at": null,
+        "schedule_age_seconds": null,
+        "as_of": "2026-09-13T04:10:00Z",
+        "projected_at": "2026-09-13T04:10:00Z",
+        "bundle_evaluated_at": "2026-09-13T04:10:00Z",
+        "freshness": "fresh",
+        "coverage": "complete",
+        "sources": [
+          {
+            "name": "ace",
+            "routes": [
+              "A"
+            ],
+            "source_timestamp": "2026-09-13T04:10:00Z",
+            "freshness": "fresh"
+          }
+        ],
+        "trains": [
+          {
+            "route_id": "A",
+            "direction": "unknown",
+            "direction_id": null,
+            "trip_id": null,
+            "service_date": null,
+            "trip_instance_id": null,
+            "realtime_trip_id": "unmatched-trip",
+            "source_record_id": "WyJhY2UiLCJ1cGRhdGUiLGZhbHNlLDBd",
+            "source_name": "ace",
+            "entity_id": "update",
+            "source_index": 0,
+            "vehicle_entity_id": "",
+            "vehicle_match": "unmatched",
+            "shape_id": null,
+            "service_pattern_id": null,
+            "schedule_version": null,
+            "latitude": null,
+            "longitude": null,
+            "projected_at": "2026-09-13T04:10:00Z",
+            "position_basis": "realtime_prediction",
+            "movement_state": "unknown",
+            "source_timestamp": "2026-09-13T04:10:00Z",
+            "source_age_seconds": 0,
+            "received_at": "2026-09-13T04:10:00Z",
+            "trip_update_timestamp": null,
+            "trip_update_timestamp_present": false,
+            "trip_update_freshness": "fresh",
+            "vehicle_timestamp": null,
+            "vehicle_timestamp_present": false,
+            "vehicle_freshness": "unavailable",
+            "freshness": "fresh",
+            "observation_time": "2026-09-13T04:10:00Z",
+            "observation_age_seconds": 0,
+            "observation_basis": "feed_header",
+            "schedule_validated_at": null,
+            "schedule_age_seconds": null,
+            "interpolation_method": "",
+            "reconciliation_outcome": "unavailable",
+            "reconciliation_reason": "schedule_missing",
+            "fallback_reason": null,
+            "no_position_reason": "schedule_missing",
+            "realtime_service_date": "20260913"
+          }
+        ]
+      }
+    RealtimePositions:
+      summary: "Fresh prediction on a synthetic bent shape."
+      value: {
+        "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schedule_eligible": true,
+        "schedule_source": "supplemented",
+        "schedule_validated_at": "2026-09-13T04:10:00Z",
+        "schedule_age_seconds": 0,
+        "as_of": "2026-09-13T04:09:00Z",
+        "projected_at": "2026-09-13T04:10:00Z",
+        "bundle_evaluated_at": "2026-09-13T04:10:00Z",
+        "freshness": "fresh",
+        "coverage": "complete",
+        "sources": [
+          {
+            "name": "ace",
+            "routes": [
+              "A"
+            ],
+            "source_timestamp": "2026-09-13T04:09:00Z",
+            "freshness": "fresh"
+          }
+        ],
+        "trains": [
+          {
+            "route_id": "A",
+            "direction": "unknown",
+            "direction_id": 1,
+            "trip_id": "trip",
+            "service_date": "20260913",
+            "trip_instance_id": "WyJ0cmlwIiwiMjAyNjA5MTMiXQ",
+            "realtime_trip_id": "trip",
+            "realtime_service_date": "20260913",
+            "source_record_id": "WyJhY2UiLCJ1cGRhdGUiLGZhbHNlLDBd",
+            "source_name": "ace",
+            "entity_id": "update",
+            "source_index": 0,
+            "vehicle_entity_id": "",
+            "vehicle_match": "unmatched",
+            "shape_id": "shape",
+            "service_pattern_id": "acaca46b32273fa5d9c33a9039140688860baeb55105ede78b1b141bd11c9a24",
+            "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "latitude": 40.8,
+            "longitude": -73.911605063314,
+            "projected_at": "2026-09-13T04:10:00Z",
+            "position_basis": "realtime_prediction",
+            "movement_state": "inferred_moving",
+            "source_timestamp": "2026-09-13T04:09:00Z",
+            "source_age_seconds": 60,
+            "received_at": "2026-09-13T04:09:00Z",
+            "trip_update_timestamp": null,
+            "trip_update_timestamp_present": false,
+            "trip_update_freshness": "fresh",
+            "vehicle_timestamp": null,
+            "vehicle_timestamp_present": false,
+            "vehicle_freshness": "unavailable",
+            "freshness": "fresh",
+            "observation_time": "2026-09-13T04:09:00Z",
+            "observation_age_seconds": 60,
+            "observation_basis": "feed_header",
+            "schedule_validated_at": "2026-09-13T04:10:00Z",
+            "schedule_age_seconds": 0,
+            "interpolation_method": "realtime_events",
+            "reconciliation_outcome": "matched",
+            "reconciliation_reason": "unique_identity",
+            "fallback_reason": null,
+            "no_position_reason": null
+          }
+        ]
+      }
+    StaleSchedulePositions:
+      summary: "The same run one second later: stale realtime evidence and authorized schedule simulation."
+      value: {
+        "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "schedule_eligible": true,
+        "schedule_source": "supplemented",
+        "schedule_validated_at": "2026-09-13T04:10:00Z",
+        "schedule_age_seconds": 1,
+        "as_of": "2026-09-13T04:09:00Z",
+        "projected_at": "2026-09-13T04:10:01Z",
+        "bundle_evaluated_at": "2026-09-13T04:10:00Z",
+        "freshness": "stale",
+        "coverage": "complete",
+        "sources": [
+          {
+            "name": "ace",
+            "routes": [
+              "A"
+            ],
+            "source_timestamp": "2026-09-13T04:09:00Z",
+            "freshness": "stale"
+          }
+        ],
+        "trains": [
+          {
+            "route_id": "A",
+            "direction": "unknown",
+            "direction_id": 1,
+            "trip_id": "trip",
+            "service_date": "20260913",
+            "trip_instance_id": "WyJ0cmlwIiwiMjAyNjA5MTMiXQ",
+            "realtime_trip_id": "trip",
+            "realtime_service_date": "20260913",
+            "source_record_id": "WyJhY2UiLCJ1cGRhdGUiLGZhbHNlLDBd",
+            "source_name": "ace",
+            "entity_id": "update",
+            "source_index": 0,
+            "vehicle_entity_id": "",
+            "vehicle_match": "unmatched",
+            "shape_id": "shape",
+            "service_pattern_id": "acaca46b32273fa5d9c33a9039140688860baeb55105ede78b1b141bd11c9a24",
+            "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "latitude": 40.8,
+            "longitude": -73.91199189875779,
+            "projected_at": "2026-09-13T04:10:01Z",
+            "position_basis": "schedule_fallback",
+            "movement_state": "unknown",
+            "source_timestamp": "2026-09-13T04:09:00Z",
+            "source_age_seconds": 61,
+            "received_at": "2026-09-13T04:09:00Z",
+            "trip_update_timestamp": null,
+            "trip_update_timestamp_present": false,
+            "trip_update_freshness": "stale",
+            "vehicle_timestamp": null,
+            "vehicle_timestamp_present": false,
+            "vehicle_freshness": "unavailable",
+            "freshness": "stale",
+            "observation_time": "2026-09-13T04:09:00Z",
+            "observation_age_seconds": 61,
+            "observation_basis": "feed_header",
+            "schedule_validated_at": "2026-09-13T04:10:00Z",
+            "schedule_age_seconds": 1,
+            "interpolation_method": "schedule",
+            "reconciliation_outcome": "matched",
+            "reconciliation_reason": "unique_identity",
+            "fallback_reason": "stale_realtime_counterpart",
+            "no_position_reason": null
+          }
+        ]
+      }

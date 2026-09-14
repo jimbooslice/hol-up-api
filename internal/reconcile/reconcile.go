@@ -3,6 +3,8 @@
 package reconcile
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"math"
 	"slices"
 	"sync/atomic"
@@ -15,6 +17,15 @@ import (
 type Instance struct {
 	TripID      string
 	ServiceDate schedule.Date
+}
+
+// ID encodes the pair without delimiter collisions or dependence on realtime IDs.
+func (i Instance) ID() string {
+	if i.TripID == "" || i.ServiceDate == "" {
+		return ""
+	}
+	value, _ := json.Marshal([2]string{i.TripID, string(i.ServiceDate)})
+	return base64.RawURLEncoding.EncodeToString(value)
 }
 
 type Source struct {
@@ -73,6 +84,7 @@ type Match struct {
 	Candidates   []Instance
 	Instance     Instance // Set only for a unique match, including cancellations.
 	Stops        []StopResolution
+	VehicleStop  *StopResolution
 }
 
 type ReplacementRule struct {
@@ -109,6 +121,28 @@ type Bundle struct {
 
 func (b *Bundle) Metadata() Metadata          { return b.metadata }
 func (b *Bundle) Schedule() *schedule.Version { return b.version }
+
+// ScheduleEligible and MetadataAt recheck the captured version at reader time.
+func (b *Bundle) ScheduleEligible(now time.Time) bool {
+	return b != nil && b.metadata.ScheduleEligible && b.version.Eligible(now, b.maxScheduleAge)
+}
+
+func (b *Bundle) MetadataAt(now time.Time) Metadata {
+	if b == nil {
+		return Metadata{EvaluatedAt: now, Reason: "schedule_missing"}
+	}
+	m := b.metadata
+	m.EvaluatedAt, m.ScheduleEligible = now, b.ScheduleEligible(now)
+	if m.SchedulePresent && !m.ScheduleEligible {
+		m.Reason = "schedule_ineligible"
+	}
+	return m
+}
+
+func (b *Bundle) StaleAfter() time.Duration { return b.staleAfter }
+func (b *Bundle) FreshnessAt(timestamp, now time.Time) realtime.Freshness {
+	return realtime.FreshnessAt(timestamp, now, b.staleAfter)
+}
 func (b *Bundle) Sources() []Provenance {
 	var out []Provenance
 	for _, s := range b.sources {
@@ -125,6 +159,10 @@ func (b *Bundle) Matches() []Match {
 			m.Candidates = slices.Clone(m.Candidates)
 			m.Rejections = slices.Clone(m.Rejections)
 			m.Stops = slices.Clone(m.Stops)
+			if m.VehicleStop != nil {
+				stop := *m.VehicleStop
+				m.VehicleStop = &stop
+			}
 			out = append(out, m)
 		}
 	}
@@ -210,7 +248,7 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 			if !b.metadata.ScheduleEligible {
 				m.Outcome, m.Reason = Unavailable, b.metadata.Reason
 			} else {
-				matchTrip(&m, trips, version.Dataset(), now)
+				matchTrip(&m, trips, version.Dataset())
 				if m.Outcome == Matched || m.Outcome == Ambiguous {
 					for _, candidate := range m.Candidates {
 						reverse[candidate]++
@@ -231,6 +269,10 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 					trip, _ := version.Dataset().Trip(m.Instance.TripID)
 					m.Owned = slices.Contains(p.Routes, trip.RouteID)
 					m.Stops = resolveStops(m.Train.Stops, trip.Stops)
+					if m.Train.VehicleMatch == realtime.VehicleMatched && (m.Train.VehicleStopID != "" || m.Train.VehicleStopSequence != nil) {
+						stop := ResolveStop(realtime.StopPrediction{StopID: m.Train.VehicleStopID, Sequence: m.Train.VehicleStopSequence}, trip.Stops)
+						m.VehicleStop = &stop
+					}
 				}
 			}
 			if m.Outcome != Matched {
@@ -254,6 +296,37 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 			}
 		}
 		b.sources = append(b.sources, state)
+	}
+	// A run cannot acquire a unique identity from two different feed snapshots.
+	reverse := map[Instance]int{}
+	for _, source := range b.sources {
+		for _, match := range source.matches {
+			if match.Outcome == Matched || match.Outcome == Ambiguous {
+				for _, candidate := range match.Candidates {
+					reverse[candidate]++
+				}
+			}
+		}
+	}
+	for i := range b.sources {
+		source := &b.sources[i]
+		for j := range source.matches {
+			m := &source.matches[j]
+			if m.Outcome != Matched {
+				continue
+			}
+			trip, _ := version.Dataset().Trip(m.Instance.TripID)
+			reason := ""
+			if reverse[m.Instance] != 1 {
+				reason = "multiple_realtime_counterparts"
+			} else if b.routeOwner(trip.RouteID) == -2 {
+				reason = "ambiguous_route_owner"
+			}
+			if reason != "" {
+				source.blocked[m.Instance] = true
+				m.Outcome, m.Reason, m.Instance = Ambiguous, reason, Instance{}
+			}
+		}
 	}
 	return b
 }
@@ -292,7 +365,7 @@ type FallbackDecision struct {
 // Fallback rechecks authority at the reader's time, including outages after
 // publication. Windows form a union without enumerating unbounded service dates.
 func (b *Bundle) Fallback(instance Instance, now time.Time) FallbackDecision {
-	if b == nil || !b.metadata.ScheduleEligible || !b.version.Eligible(now, b.maxScheduleAge) {
+	if !b.ScheduleEligible(now) {
 		return FallbackDecision{Reason: "schedule_ineligible"}
 	}
 	trip, ok := b.version.Dataset().Trip(instance.TripID)
@@ -301,14 +374,9 @@ func (b *Bundle) Fallback(instance Instance, now time.Time) FallbackDecision {
 	}
 	allowed := FallbackDecision{Eligible: true, Reason: "no_replacement_authority"}
 	// Duplicate configured owners cannot establish absence.
-	owner := -1
-	for i, source := range b.sources {
-		if slices.Contains(source.provenance.Routes, trip.RouteID) {
-			if owner >= 0 {
-				return FallbackDecision{Eligible: true, Reason: "ambiguous_route_owner"}
-			}
-			owner = i
-		}
+	owner := b.routeOwner(trip.RouteID)
+	if owner == -2 {
+		return FallbackDecision{Eligible: true, Reason: "ambiguous_route_owner"}
 	}
 	if owner < 0 {
 		return allowed
@@ -329,14 +397,21 @@ func (b *Bundle) Fallback(instance Instance, now time.Time) FallbackDecision {
 	if !departure.After(now) {
 		return FallbackDecision{Eligible: true, Reason: "departure_not_future"}
 	}
-	for _, rule := range source.rules {
-		if !rule.Valid || rule.Period.RouteID != trip.RouteID {
+	if replacementContains(source.rules, trip.RouteID, departure) {
+		return FallbackDecision{Suppressed: true, Reason: "absent_from_replacement_period"}
+	}
+	return allowed
+}
+
+func replacementContains(rules []ReplacementRule, routeID string, departure time.Time) bool {
+	for _, rule := range rules {
+		if !rule.Valid || rule.Period.RouteID != routeID {
 			continue
 		}
 		p := rule.Period
 		if (p.Start == nil || !departure.Before(time.Unix(int64(*p.Start), 0))) && (p.End == nil || departure.Before(time.Unix(int64(*p.End), 0))) {
-			return FallbackDecision{Suppressed: true, Reason: "absent_from_replacement_period"}
+			return true
 		}
 	}
-	return allowed
+	return false
 }

@@ -19,7 +19,7 @@ func TestPartialFeedResponses(t *testing.T) {
 		{NextStopID: "A01N", EntityID: "a", RouteID: "A", TripID: "trip-a"},
 		{NextStopID: "A01N", EntityID: "s", RouteID: "S", TripID: "trip-s"},
 	}})
-	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute)
+	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute, nil)
 
 	readyRecorder := get(handler, "/readyz")
 	var ready readinessResponse
@@ -36,7 +36,7 @@ func TestPartialFeedResponses(t *testing.T) {
 	}
 	emptyACE := realtime.NewStore()
 	replace(t, emptyACE, realtime.Snapshot{SourceTimestamp: now})
-	emptyRoutesRecorder := get(NewHandler(testSources(emptyACE, realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute), "/api/v1/routes")
+	emptyRoutesRecorder := get(NewHandler(testSources(emptyACE, realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute, nil), "/api/v1/routes")
 	var emptyRoutes routesResponse
 	decode(t, emptyRoutesRecorder, &emptyRoutes)
 	if emptyRoutesRecorder.Code != http.StatusOK || emptyRoutes.Coverage != CoveragePartial || len(emptyRoutes.Routes) != 0 {
@@ -78,7 +78,7 @@ func TestLoadedFeedsKeepFreshnessSeparateFromCoverage(t *testing.T) {
 	ace, nqrw := realtime.NewStore(), realtime.NewStore()
 	replace(t, ace, realtime.Snapshot{SourceTimestamp: now.Add(-2 * time.Minute), Trains: []realtime.Train{{NextStopID: "A01N", RouteID: "A", TripID: "trip-a"}}})
 	replace(t, nqrw, realtime.Snapshot{SourceTimestamp: now})
-	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute)
+	handler := NewHandler(testSources(ace, nqrw), telemetry.New(), func() time.Time { return now }, time.Minute, nil)
 
 	readyRecorder := get(handler, "/readyz")
 	var ready readinessResponse
@@ -115,7 +115,7 @@ func TestLoadedFeedsKeepFreshnessSeparateFromCoverage(t *testing.T) {
 		t.Fatalf("fully covered unknown route = %d/%#v", unknownRecorder.Code, unknown)
 	}
 
-	staleOnlyRecorder := get(NewHandler(testSources(ace, realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute), "/readyz")
+	staleOnlyRecorder := get(NewHandler(testSources(ace, realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute, nil), "/readyz")
 	var staleOnly readinessResponse
 	decode(t, staleOnlyRecorder, &staleOnly)
 	if staleOnlyRecorder.Code != http.StatusServiceUnavailable || staleOnly.Freshness != realtime.FreshnessStale || staleOnly.Coverage != CoveragePartial {
@@ -125,7 +125,7 @@ func TestLoadedFeedsKeepFreshnessSeparateFromCoverage(t *testing.T) {
 
 func TestNoSourcesAndRequestErrors(t *testing.T) {
 	now := time.Date(2026, time.September, 2, 12, 1, 0, 0, time.UTC)
-	handler := NewHandler(testSources(realtime.NewStore(), realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute)
+	handler := NewHandler(testSources(realtime.NewStore(), realtime.NewStore()), telemetry.New(), func() time.Time { return now }, time.Minute, nil)
 
 	readyRecorder := get(handler, "/readyz")
 	var ready readinessResponse
@@ -150,7 +150,7 @@ func TestNoSourcesAndRequestErrors(t *testing.T) {
 }
 
 func TestHealthAndOpenAPIBypassRealtimeState(t *testing.T) {
-	handler := NewHandler(nil, telemetry.New(), func() time.Time { panic("now called") }, time.Minute)
+	handler := NewHandler(nil, telemetry.New(), func() time.Time { panic("now called") }, time.Minute, nil)
 
 	health := get(handler, "/healthz")
 	if health.Code != http.StatusOK || strings.TrimSpace(health.Body.String()) != `{"status":"ok"}` {
@@ -189,7 +189,7 @@ func TestTrainDTOUsesSnakeCaseAndNullTimestamps(t *testing.T) {
 		PositionBasis:          realtime.PositionBasisRealtimePrediction,
 		MovementState:          realtime.MovementStateInferredMoving,
 	}}})
-	recorder := get(NewHandler([]Source{{Name: "ace", Routes: []string{"A", "C", "E"}, Store: store}}, telemetry.New(), func() time.Time { return now }, time.Minute), "/api/v1/trains?route_id=A")
+	recorder := get(NewHandler([]Source{{Name: "ace", Routes: []string{"A", "C", "E"}, Store: store}}, telemetry.New(), func() time.Time { return now }, time.Minute, nil), "/api/v1/trains?route_id=A")
 
 	want := `{"as_of":"2026-09-02T12:00:00Z","freshness":"fresh","trains":[{"entity_id":"vehicle-a","route_id":"A","trip_id":"trip-a","service_date":"20260902","start_time":"","direction_id":null,"direction":"northbound","next_stop_id":"A01N","next_stop_sequence":4,"predicted_at":null,"prediction_delay_seconds":60,"position_basis":"realtime_prediction","movement_state":"unknown","freshness":"fresh","source_timestamp":"2026-09-02T12:00:00Z","source_name":"","received_at":null,"trip_update_timestamp":null,"trip_update_freshness":"unavailable","vehicle_entity_id":"","vehicle_timestamp":null,"vehicle_freshness":"unavailable","vehicle_match":"unmatched"}],"coverage":"complete","sources":[{"name":"ace","routes":["A","C","E"],"source_timestamp":"2026-09-02T12:00:00Z","freshness":"fresh"}]}`
 	body := strings.TrimSpace(recorder.Body.String())
@@ -210,7 +210,7 @@ func TestMetricsUseAvailableFeedsAndAnyFreshReadiness(t *testing.T) {
 	// Deliberately stale telemetry proves aggregate gauges read the source stores.
 	metrics.Record("ace", true, 250*time.Millisecond, now, now.Add(-10*time.Minute), 7)
 	metrics.Record("nqrw", false, 500*time.Millisecond, now, now.Add(-20*time.Minute), 11)
-	recorder := get(NewHandler(testSources(ace, nqrw), metrics, func() time.Time { return now }, time.Minute), "/metrics")
+	recorder := get(NewHandler(testSources(ace, nqrw), metrics, func() time.Time { return now }, time.Minute, nil), "/metrics")
 	for _, want := range []string{
 		"holup_realtime_ready 1\n",
 		"holup_realtime_trains 3\n",
@@ -234,7 +234,7 @@ func TestMetricsUseAvailableFeedsAndAnyFreshReadiness(t *testing.T) {
 	staleMetrics := telemetry.New("ace", "nqrw")
 	staleMetrics.Record("ace", true, time.Millisecond, now, now.Add(-2*time.Minute), 0)
 	staleMetrics.Record("nqrw", true, time.Millisecond, now, now.Add(-3*time.Minute), 0)
-	staleRecorder := get(NewHandler(testSources(staleACE, staleNQRW), staleMetrics, func() time.Time { return now }, time.Minute), "/metrics")
+	staleRecorder := get(NewHandler(testSources(staleACE, staleNQRW), staleMetrics, func() time.Time { return now }, time.Minute, nil), "/metrics")
 	if !strings.Contains(staleRecorder.Body.String(), "holup_realtime_ready 0\n") {
 		t.Fatalf("all-stale metrics = %s", staleRecorder.Body.String())
 	}

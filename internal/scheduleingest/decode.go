@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	ParserSchema               = "1"
+	ParserSchema               = "2"
 	MaxArchiveBytes      int64 = 64 << 20
 	MaxUncompressedBytes int64 = 512 << 20
 	MaxEntryBytes        int64 = 256 << 20
@@ -74,6 +74,7 @@ func decode(archive []byte, limit limits) (*schedule.Dataset, error) {
 	}
 	var data schedule.Data
 	tripIndexes := map[string]int{}
+	shapeIndexes := map[string]int{}
 	tables := []struct {
 		name     string
 		required []string
@@ -205,7 +206,41 @@ func decode(archive []byte, limit limits) (*schedule.Dataset, error) {
 			if err != nil {
 				return err
 			}
-			data.Trips[index].Stops = append(data.Trips[index].Stops, schedule.StopTime{StopID: r.get("stop_id"), Sequence: uint32(sequence), Arrival: arrival, Departure: departure, Timepoint: tp == 1})
+			distance, err := optionalDistance(r.get("shape_dist_traveled"))
+			if err != nil {
+				return err
+			}
+			data.Trips[index].Stops = append(data.Trips[index].Stops, schedule.StopTime{StopID: r.get("stop_id"), Sequence: uint32(sequence), Arrival: arrival, Departure: departure, Timepoint: tp == 1, ShapeDistance: distance})
+			return nil
+		}},
+		{"shapes.txt", []string{"shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"}, func(r row) error {
+			if err := r.require("shape_id", "shape_pt_lat", "shape_pt_lon", "shape_pt_sequence"); err != nil {
+				return err
+			}
+			latitude, err := coordinate(r.get("shape_pt_lat"), 90)
+			if err != nil {
+				return err
+			}
+			longitude, err := coordinate(r.get("shape_pt_lon"), 180)
+			if err != nil {
+				return err
+			}
+			sequence, err := integer(r.get("shape_pt_sequence"), math.MaxUint32)
+			if err != nil {
+				return err
+			}
+			distance, err := optionalDistance(r.get("shape_dist_traveled"))
+			if err != nil {
+				return err
+			}
+			id := r.get("shape_id")
+			index, exists := shapeIndexes[id]
+			if !exists {
+				index = len(data.Shapes)
+				shapeIndexes[id] = index
+				data.Shapes = append(data.Shapes, schedule.Shape{ID: id})
+			}
+			data.Shapes[index].Points = append(data.Shapes[index].Points, schedule.ShapePoint{Sequence: uint32(sequence), Latitude: latitude, Longitude: longitude, ShapeDistance: distance})
 			return nil
 		}},
 		{"feed_info.txt", []string{"feed_publisher_name", "feed_publisher_url", "feed_lang"}, func(r row) error {
@@ -416,6 +451,16 @@ func coordinate(value string, bound float64) (float64, error) {
 		return 0, ErrInvalid
 	}
 	return f, nil
+}
+func optionalDistance(value string) (schedule.OptionalDistance, error) {
+	if value == "" {
+		return schedule.OptionalDistance{}, nil
+	}
+	distance, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(distance) || math.IsInf(distance, 0) || distance < 0 {
+		return schedule.OptionalDistance{}, ErrInvalid
+	}
+	return schedule.OptionalDistance{Value: distance, Present: true}, nil
 }
 func validURL(value string) bool {
 	u, err := url.Parse(value)

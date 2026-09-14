@@ -356,3 +356,61 @@ func TestEveryPublicationNotifiesAfterStoreIncludingRestoreAndRenewal(t *testing
 		t.Fatalf("restore callback: %v", reasons)
 	}
 }
+
+func TestMalformedShapeRefreshRetainsPreviousGeometry(t *testing.T) {
+	loader, store, _, now, _, _, _ := testLoader(t, nil)
+	loader.Refresh(t.Context())
+	first := store.Load()
+	if first == nil {
+		t.Fatal("initial schedule missing")
+	}
+	for _, invalid := range []string{
+		"shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nA..N,NaN,-73,1\n",
+		"shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nA..N,40,-73,1\nA..N,40.001,-73,1\n",
+		"shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence,shape_dist_traveled\nA..N,40,-73,1,2\nA..N,40.001,-73,2,1\n",
+	} {
+		files := fixtureFiles()
+		files["shapes.txt"] = invalid
+		wire := zipFixture(t, files)
+		loader.client = &http.Client{Transport: roundTrip(func(*http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(wire))}, nil
+		})}
+		*now = now.Add(time.Minute)
+		loader.Refresh(t.Context())
+		shape, _ := store.Load().Dataset().Shape("A..N")
+		if store.Load() != first || !shape.Usable || shape.Points[2].Sequence != 9 || store.Load().Metadata().ValidatedAt.Equal(*now) {
+			t.Fatal("malformed shape refresh replaced or renewed the last known good geometry")
+		}
+	}
+}
+
+func TestOldParserCacheRequiresSuccessfulFetch(t *testing.T) {
+	cache := FileCache{Dir: t.TempDir()}
+	loader, _, _, now, _, _, _ := testLoader(t, cache)
+	wire := zipFixture(t, fixtureFiles())
+	dataset, err := Decode(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := schedule.NewVersion(dataset, schedule.Metadata{Source: schedule.Supplemented, ParserSchema: "1", ArchiveSHA256: archiveHash(wire), ValidatedAt: *now, PublishedAt: *now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.Save(CacheEntry{Schema: cacheSchema, Metadata: old.Metadata(), Archive: wire}); err != nil {
+		t.Fatal(err)
+	}
+	*now = now.Add(time.Hour)
+	loader.Restore(t.Context())
+	if loader.store.Load() != nil {
+		t.Fatal("old parser cache was restored or assigned a new validation time")
+	}
+	entry, err := cache.Load()
+	if err != nil || entry.Metadata.ValidatedAt != old.Metadata().ValidatedAt || entry.Metadata.ParserSchema != "1" {
+		t.Fatal("rejected cache metadata changed")
+	}
+	loader.Refresh(t.Context())
+	current := loader.store.Load()
+	if current == nil || current.Metadata().ParserSchema != ParserSchema || current.Metadata().ValidatedAt != *now || current.Metadata().Version == old.Metadata().Version {
+		t.Fatal("successful fetch did not publish the new parser version")
+	}
+}

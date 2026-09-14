@@ -1,9 +1,11 @@
 Synthetic, offline A-line ingestion fixture (no captured operational payload).
 
-`a-line.zip` contains six minimal GTFS tables with Sunday service in 2026. The
+`a-line.zip` contains seven minimal GTFS tables with Sunday service in 2026. The
 trip ID uses the supplied current-prefix example
 `BSP26GEN-A055-Sunday-00_000950_A..S74R`; its stops depart at 00:09:30 and 00:19:30
-New York service time. Coordinates and stopping pattern are test data.
+New York service time. Coordinates and stopping pattern are test data. Two canonical parent stations
+retain their platform stops; the southbound shape bends west before heading
+south. Shape distances use arbitrary units (0, 1, 2), not meters.
 
 `a-line.pb` is a GTFS-Realtime 2.0 FULL_DATASET at 2026-09-13 04:09:00 UTC, with
 NYCT extension version 1.0, an A replacement window with omitted start and end

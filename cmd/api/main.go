@@ -99,10 +99,11 @@ func run(logger *slog.Logger) error {
 		names[index] = feed.name
 	}
 	metrics := telemetry.New(names...)
+	coordinator.run("startup")
 
 	server := &http.Server{
 		Addr:              env("ADDR", defaultAddress),
-		Handler:           httpapi.NewHandler(sources, metrics, time.Now, staleAfter),
+		Handler:           httpapi.NewHandler(sources, metrics, time.Now, staleAfter, &coordinator.results),
 		ReadHeaderTimeout: 5 * time.Second,
 		WriteTimeout:      10 * time.Second,
 		IdleTimeout:       time.Minute,

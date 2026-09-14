@@ -2,9 +2,9 @@
 
 ## Summary
 
-Build an interview-ready transit platform as a Go modular monolith with a TypeScript/MapLibre UI. The repository already has a Go API that polls all eight feeds in MTA's Subway Realtime catalog, decodes protobuf messages, rejects feed headers beyond a configurable future-clock tolerance, retains per-source last-known-good snapshots, and serves route and train endpoints. It also exposes OpenAPI, health/readiness, per-feed metrics, safe structured failure/recovery logs, a local LGTM environment, and a container smoke test. Static GTFS ingestion and internal schedule–realtime reconciliation are implemented; map projection, alerts, journey planning, capture persistence, the UI, and the assistant remain future work.
+Build an interview-ready transit platform as a Go modular monolith with a TypeScript/MapLibre UI. The repository already has a Go API that polls all eight feeds in MTA's Subway Realtime catalog, decodes protobuf messages, rejects feed headers beyond a configurable future-clock tolerance, retains per-source last-known-good snapshots, and serves route and train endpoints. It also exposes OpenAPI, health/readiness, per-feed metrics, safe structured failure/recovery logs, a local LGTM environment, and a container smoke test. Static GTFS ingestion, schedule–realtime reconciliation, route geometry, and train projection are implemented; alerts, journey planning, capture persistence, the UI, and the assistant remain future work.
 
-Start by making the existing realtime facts safe to rely on. Then add schedule projection, all-route map data, deterministic line status and journey impact, and finally a deferred LLM explanation layer.
+The implemented realtime and schedule projection foundation supplies map data. Next add the browser, deterministic line status and journey impact, then a deferred LLM explanation layer.
 
 ```text
 MTA schedules ─┐
@@ -22,8 +22,8 @@ The realtime foundation was verified at commit `4244cbd`; realtime semantic comp
 - **Delivered realtime foundation:** all eight independently refreshed MTA subway realtime feeds; atomic last-known-good snapshots; route ownership and partial/unavailable coverage; stale/unavailable states; route and train APIs; health, readiness, metrics, and OpenAPI endpoints; safe structured refresh and recovery logs; container build/smoke verification; and configurable future feed-header timestamp rejection with retained-data recovery.
 - **Delivered realtime semantics:** nullable prediction/delay presence; separate feed, trip-update, and vehicle freshness; bidirectionally unique vehicle matching; complete normalized stop events and relationships; retained canceled/deleted trips; and feed/entity/receipt provenance. The compact API and active counts are derived from this retained state. Sequence-only stops remain internal and can be associated with scheduled occurrences; original feed order is retained separately from compact sorting.
 - **Delivered schedule ingestion (Phase 1):** independent startup/hourly supplemented ingestion; bounded ZIP/CSV validation; New York service calendars, DST and extended-hour times; atomic immutable dataset/index versions; supplemented retention and regular fallback; a validated atomic disk cache; and source selection/publication/failure/recovery logs. Configuration and persistence decisions are documented in `README.md`.
-- **Delivered internal reconciliation:** immutable schedule/source bundles, exact and MTA suffix matching, explicit ambiguity and stop outcomes, validated replacement authority with freshness checks at lookup, and serialized publication callbacks. HTTP, readiness, simulation, and projection behavior are unchanged.
-- **Not started:** shape projection, alerts and operational facts, journey routing, browser UI, assistant and access control, capture/replay persistence, and standalone architecture decision records.
+- **Delivered internal reconciliation:** immutable schedule/source bundles, exact and MTA suffix matching, explicit ambiguity and stop outcomes, validated replacement authority with freshness checks at lookup, and serialized publication callbacks. Compact HTTP responses and readiness remain unchanged. Geometry and the positions view use the captured bundle; explicit simulation decisions govern stale and absent scheduled runs.
+- **Not started:** alerts and operational facts, journey routing, browser UI, assistant and access control, capture/replay persistence, and standalone architecture decision records.
 
 The checkboxes below describe implementation status. A checked item has repository evidence; an unchecked item may include a note describing partial work without claiming completion.
 
@@ -31,7 +31,7 @@ The checkboxes below describe implementation status. A checked item has reposito
 
 ### Core transit platform
 
-- [ ] Keep one Go application with transport-neutral modules for schedule ingestion, realtime reconciliation, projection, alerts, journey planning, operational facts, and assistant orchestration. Serve the compiled UI from the same container. **Partial:** the current realtime API is a Go modular monolith in one container; schedule and reconciliation modules are also internal; projection, journey modules and UI remain deferred.
+- [ ] Keep one Go application with transport-neutral modules for schedule ingestion, realtime reconciliation, projection, alerts, journey planning, operational facts, and assistant orchestration. Serve the compiled UI from the same container. **Partial:** the current realtime API is a Go modular monolith in one container; schedule, reconciliation, and projection modules are also internal; alerts, journey modules, assistant orchestration, and UI remain deferred.
 - [x] Keep MTA adapters at the boundary. The core domain must not depend on HTTP, protobuf, CSV, or a persistence framework. **Delivered:** protobuf/HTTP work stays in `internal/ingest`; schedule HTTP/ZIP/CSV and disk caching stay in `internal/scheduleingest`. `internal/realtime`, `internal/schedule`, and `internal/reconcile` are transport- and persistence-neutral.
 - [x] Validate a feed header timestamp against local receipt time with a small allowed skew before publication. Reject materially future timestamps so a bad upstream clock cannot block later valid updates. **Delivered:** `MTA_GTFS_RT_MAX_FUTURE_SKEW` defaults to `30s`, supports strict zero, is validated before startup, and applies to all eight loaders.
 - [x] Preserve field presence when normalizing GTFS-Realtime. An omitted delay or prediction remains unknown; do not expose it as zero or on-time. `prediction_delay_seconds` is nullable in the API. **Delivered:** omitted delays stay null, explicit zero remains zero, absolute-only predictions do not invent delay, and `NO_DATA` blocks prediction and trip-delay fallback.
@@ -44,7 +44,7 @@ The checkboxes below describe implementation status. A checked item has reposito
 - [x] Parse GTFS by CSV headers. Resolve service in `America/New_York` using `calendar.txt` and `calendar_dates.txt`, including daylight-saving boundaries and times beyond 24:00. Include timezone data in the runtime image or embed it in the Go binary. **Delivered:** exception-only calendars, optional time presence, GTFS noon-minus-12-hours instants, and embedded timezone data.
 - [ ] Build and publish the schedule dataset and its routing index as one compatible version. Bound ZIP decompression, define schedule-cache expiry, and retain capture data for a defined window. **Partial:** immutable dataset and trip/route/service/ordered-stop lookup indexes publish together; ZIP/CSV and cache reads are bounded; one active archive persists atomically without renewing validation age on restart. Journey routing indexes and capture history remain deferred.
 - [x] Define MTA-specific realtime/static reconciliation before schedule fallback or journey overlays. Realtime trip IDs do not necessarily match static trip IDs; unmatched and ambiguous outcomes must remain explicit. Apply NYCT trip-replacement periods so static trips absent from a complete realtime replacement period are not resurrected as active service. [MTA subway GTFS-Realtime reference](https://www.mta.info/document/134521)
-- [ ] Project trains along GTFS shapes between stop events, but never describe an interpolated point as GPS-observed. A stale feed shows a visible warning and falls back to schedule simulation when a trustworthy matching trip exists.
+- [x] Project trains along GTFS shapes between stop events, but never describe an interpolated point as GPS-observed. Stale feed age and schedule simulation are explicit in the API when reconciliation authorizes the run; the browser warning remains UI work.
 
 Expose these semantic fields in projected train and journey responses:
 
@@ -61,8 +61,9 @@ normalized source snapshots and configured route ownership, an evaluation time,
 and the existing freshness limits. It returns a separate immutable bundle with
 schedule eligibility, provenance, matching outcomes, stop associations, rejection
 reasons, and replacement rules. Mutable inputs and collection lookups are copied.
-Missing/ineligible schedules grant no fallback authority. No public response,
-readiness, prediction, simulation, or position rendering consumes this bundle yet.
+Missing/ineligible schedules grant no fallback authority. Geometry and the opt-in
+positions response consume this bundle. Compact responses and readiness continue
+to use their existing source-state behavior.
 
 Matching uses explicit service dates, otherwise the schedule's candidate-date
 calculation, and checks coverage and calendar activity for each candidate.
@@ -108,6 +109,26 @@ outcomes rather than enumerating unbounded future service. Every lookup rechecks
 schedule eligibility and source freshness, so published results lose suppression
 authority after an outage. Fallback eligibility expresses internal authority,
 not a request to render an inferred prediction.
+
+`Bundle.SimulationDecision` separately authorizes rendering. A stale uniquely
+matched run can simulate under the same trip-instance ID and retain its stale
+realtime provenance. This supersedes the earlier draft recommendation to disable
+simulation during outages. Permission requires an eligible captured schedule,
+active service, exactly one configured owner, and retained complete source data
+with usable metadata. Known cancellations and uncertain candidate/source/route
+associations remain vetoes after staleness. Absent runs remain suppressed inside
+retained replacement windows after departure or freshness expiry; a retained
+unique counterpart counts as present. Simulation stays inside scheduled first
+departure/final arrival and uses the existing maximum schedule age (24h default).
+Fresh records without timing or geometry stay null, with an explicit reason.
+
+The geometry endpoint returns canonical station Points, shape LineStrings, and
+ordered stop occurrences per pattern. The positions view uses distance along the
+captured shape and never labels coordinates as GPS-observed. Both responses carry
+schedule versions; clients refetch geometry on mismatch and restart interpolation
+after nulls, ambiguity, path/direction/identity changes, or basis transitions.
+Older parser-schema caches require a successful new schedule fetch during rollout;
+reinterpreting bytes cannot renew cached validation time.
 
 Application wiring owns the schedule store, source registry, and result store.
 Every successful realtime publication and every schedule publication (including
@@ -192,10 +213,12 @@ Do not introduce Redis solely to connect a future Rust service to Go. Redis Pub/
 
 - [x] `GET /api/v1/routes`
   - Return route IDs from every loaded source with aggregate coverage and per-source status; return `503 source_unavailable` only when no source has loaded.
-- [ ] `GET /api/v1/routes/{route_id}/geometry`
+- [x] `GET /api/v1/routes/{route_id}/geometry`
 - [x] `GET /api/v1/trains?route_id=A`
   - Return stale or fresh data from the route's owning source. Additional observed routes may return partial results; an unobserved route returns `503` until every source has loaded and then returns an empty list.
-- [ ] `GET /api/v1/stations?query=...`
+- [x] `GET /api/v1/trains?route_id=A&view=positions`
+  - Return complete attributable trip-update outcomes and authorized schedule simulation; preserve null outcomes and stable scheduled identity.
+- [ ] `GET /api/v1/stations?query=...` — deferred; geometry already contains canonical stations.
 - [ ] `GET /api/v1/routes/{route_id}/status?at=...`
 - [ ] `POST /api/v1/journeys/impact`
   - Input: canonical origin/destination station IDs and optional departure time.
@@ -220,9 +243,10 @@ Successful realtime responses include `coverage` and `sources`; each source repo
 ## Delivery Sequence
 
 - [x] **Phase 1 — Realtime correctness:** timestamp-skew validation, nullable predictions/delays, observation freshness, bidirectional matching, complete normalized stop/cancellation/provenance state, partial-feed coverage, and low-cost health endpoints are implemented and covered by regression tests. All eight feed groups, safe structured lifecycle/failure/recovery logs, metrics, and the local [Grafana LGTM environment](ops/lgtm/README.md) are delivered. Application tracing/profiling, alerts, and custom dashboards remain deferred.
-- [ ] **Phase 2 — Schedule projection:** ingest and atomically publish supplemented/regular schedules and routing indexes; implement MTA reconciliation, replacement periods, A-line station/shape projection, and provenance.
+- [x] **Phase 2a — Schedule ingestion and reconciliation:** atomically publish supplemented/regular schedules and lookup indexes; retain validated NYCT replacement periods; reconcile realtime trip instances and stop updates with explicit ambiguity; and publish provenance-rich immutable results.
+- [x] **Phase 2b — A-line projection:** canonical station records in route geometry and opt-in train positions with explicit `realtime_prediction` or `schedule_fallback` basis. Station search remains deferred; synthetic geometry is verified and live A-line alignment remains unmeasured.
 - [ ] **Phase 3 — Capture and replay:** record bounded raw snapshots through `SnapshotStore`, add a controllable clock, and replay rush-hour and outage scenarios. **Partial:** loaders and HTTP handlers accept controllable clocks in tests; raw capture, replay, and a shared simulation clock remain. Revisit the Rust CLI when these captures have practical value.
-- [ ] **Phase 4 — All routes and public map:** add supported route selection, accessibility-conscious UI, container deployment, metrics, and MTA compliance notices using the complete realtime feed set. **Partial:** the backend covers all realtime feed groups, is containerized, and exports metrics; route geometry, UI, accessibility work, and compliance notices remain.
+- [ ] **Phase 4 — All routes and public map:** add supported route selection, accessibility-conscious UI, container deployment, metrics, and MTA compliance notices using the complete realtime feed set. **Partial:** the backend covers all realtime feed groups, is containerized, exports metrics, and provides generic route geometry/positions; operational alignment validation, UI, accessibility work, and compliance notices remain.
 - [ ] **Phase 5 — Operational status:** ingest service alerts and ship deterministic line-status cards and APIs.
 - [ ] **Phase 6 — Journey impact:** build the routing index, station selectors, realtime overlay, and origin-to-destination impact UI.
 - [ ] **Phase 7 — Local assistant:** implement the Go model adapter, deterministic fact rendering, template fallback, chat drawer, and offline evaluation suite.
@@ -237,8 +261,8 @@ The smallest convincing PoC is an A-line vertical slice that proves realtime fac
 
 1. **Complete:** realtime semantic foundation: nullable prediction/delay presence, observation timestamps and freshness, bidirectional trip/vehicle ambiguity handling, and complete ordered stop/cancellation/provenance state.
 2. **Complete:** ingest supplemented GTFS with regular-feed fallback, bounded ZIP/CSV parsing, `America/New_York` service-day handling, atomic last-known-good publication, and compatible schedule/index versioning.
-3. **Complete internally:** define and test MTA trip reconciliation and replacement periods before using any schedule fallback.
-4. Deliver A-line station and route geometry APIs plus train projection with explicit `realtime_prediction` versus `schedule_fallback` basis and stale-data behavior.
+3. **Delivered:** reconcile MTA trip instances and replacement periods before schedule fallback, preserving unmatched and ambiguous outcomes.
+4. **Delivered:** route geometry with canonical stations and opt-in train positions with explicit `realtime_prediction` versus `schedule_fallback` basis and stale-data behavior.
 5. Add a minimal accessible browser map using HTTP polling, route selection, train positions, source age, and a visible stale/simulation banner. Keep it in the existing container.
 6. Record the expensive-to-reverse decisions as ADRs and retain automated Go, race, vet, API, and container checks for the vertical slice.
 
@@ -262,6 +286,7 @@ MVP acceptance: all supported routes have a usable map and source status; active
 - [x] Test timestamp skew rejection, atomic replacement, and out-of-order recovery. For partial feeds, test one-feed startup failure, stale last-known-good retention, route-specific freshness, an observed extra route with partial coverage, unobserved-route `503` until all sources load, readiness with any fresh source, structured source errors, health/static-document handling without loading train snapshots, and the exact complete feed-to-route registry with unique ownership.
 - [x] Test omitted/zero delay, absolute arrival/departure predictions, `NO_DATA`, stale/missing/future trip and vehicle observations, ambiguity in both directions (including route filtering and duplicate descriptors), canceled/deleted trip retention, skipped/sequence-only stops, complete stop ordering, nested snapshot immutability, provenance, and compact API/metric filtering.
 - [x] Test header-based GTFS parsing, service exceptions, daylight-saving boundaries, times beyond 24:00, bounded ZIP extraction, atomic schedule/index replacement, regular-feed fallback, MTA trip reconciliation, and replacement periods. **Partial:** deterministic ingestion, immutable/concurrent reader, fallback/recovery, retained-data, cache restart/expiry/corruption, and independent-startup tests are implemented in `internal/schedule`, `internal/scheduleingest`, and `cmd/api`. Reconciliation, replacement authority, immutable result reads, serialized captures, publication renewal, and the offline A-line ingestion fixture are covered in `internal/reconcile`, `cmd/api`, and `integration`.
+- [x] Test shape parsing and atomic publication, pattern/anchor immutability, branches and repeated stops, bent-polyline interpolation, null outcomes, live-to-stale simulation and recovery under one run ID, replacement/cancellation/ambiguity vetoes, geometry-version changes, and offline geometry/positions HTTP contracts.
 - [ ] Test alert replacement, active-period boundaries, future alerts, route/stop/trip matching, plain-text extraction, and untrusted alert content.
 - [ ] Test direct journeys, transfers, no-route outcomes, midnight service days, updated arrivals, missed transfers, stale overlays, unmatched realtime trips, and schedule/realtime version consistency.
 - [ ] Test the assistant with a fake LiteLLM server: valid fact selections, valid-but-irrelevant citations, invented numbers or causes, malformed output, timeouts, `429`, cancellation, circuit opening, and template fallback.

@@ -76,6 +76,7 @@ type StopTime struct {
 	Sequence           uint32
 	Arrival, Departure OptionalTime
 	Timepoint          bool
+	ShapeDistance      OptionalDistance
 }
 type Trip struct {
 	ID, RouteID, ServiceID, Headsign, ShapeID string
@@ -106,6 +107,7 @@ type Data struct {
 	Routes     []Route
 	Stops      []Stop
 	Trips      []Trip
+	Shapes     []Shape
 	Calendars  []Calendar
 	Exceptions []Exception
 	FeedInfo   FeedInfo
@@ -128,6 +130,10 @@ type Dataset struct {
 	feedInfo           FeedInfo
 	counts             Counts
 	maxTime            int32
+	shapes             map[string]Shape
+	patterns           map[string]Pattern
+	tripPatterns       map[string]string
+	routePatterns      map[string][]string
 }
 
 func NewDataset(data Data) (*Dataset, error) {
@@ -149,7 +155,7 @@ func NewDataset(data Data) (*Dataset, error) {
 		d.routes[r.ID] = r
 	}
 	for _, s := range data.Stops {
-		if _, exists := d.stops[s.ID]; exists || s.ID == "" {
+		if _, exists := d.stops[s.ID]; exists || s.ID == "" || (s.HasCoordinates && !validCoordinates(s.Latitude, s.Longitude)) {
 			return nil, errors.New("invalid or duplicate stop")
 		}
 		d.stops[s.ID] = s
@@ -195,6 +201,9 @@ func NewDataset(data Data) (*Dataset, error) {
 		sort.Slice(t.Stops, func(i, j int) bool { return t.Stops[i].Sequence < t.Stops[j].Sequence })
 		last := int32(-1)
 		for i, s := range t.Stops {
+			if !validOptionalDistance(s.ShapeDistance) {
+				return nil, errors.New("invalid stop shape distance")
+			}
 			stop, exists := d.stops[s.StopID]
 			if !exists || stop.LocationType != 0 || (i > 0 && s.Sequence == t.Stops[i-1].Sequence) {
 				return nil, errors.New("invalid stop time reference or duplicate sequence")
@@ -250,6 +259,9 @@ func NewDataset(data Data) (*Dataset, error) {
 		}
 	}
 	d.counts.Agencies, d.counts.Routes, d.counts.Stops, d.counts.Trips, d.counts.Services = len(d.agencies), len(d.routes), len(d.stops), len(d.trips), len(d.services)
+	if err := d.buildGeometry(data.Shapes); err != nil {
+		return nil, err
+	}
 	return d, nil
 }
 

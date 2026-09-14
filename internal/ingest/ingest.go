@@ -167,23 +167,32 @@ func Decode(data []byte, routeID string) (realtime.Snapshot, error) {
 			vehicleTimestamp = observationTimestamp(vehicle.Timestamp)
 		}
 		train := realtime.Train{
-			EntityID:             entity.GetId(),
-			RouteID:              descriptor.GetRouteId(),
-			TripID:               descriptor.GetTripId(),
-			ServiceDate:          descriptor.GetStartDate(),
-			StartTime:            descriptor.GetStartTime(),
-			ScheduleRelationship: descriptor.GetScheduleRelationship().String(),
-			Stops:                stopPredictions(update.GetStopTimeUpdate()),
-			TripDelaySeconds:     update.Delay,
-			DirectionID:          descriptor.DirectionId,
-			Direction:            direction(descriptor, ""),
-			PositionBasis:        realtime.PositionBasisRealtimePrediction,
-			MovementState:        movementState(vehicle),
-			SourceTimestamp:      sourceTimestamp,
-			TripUpdateTimestamp:  observationTimestamp(update.Timestamp),
-			VehicleEntityID:      vehicleEntity.GetId(),
-			VehicleTimestamp:     vehicleTimestamp,
-			VehicleMatch:         match,
+			EntityID:                   entity.GetId(),
+			RouteID:                    descriptor.GetRouteId(),
+			TripID:                     descriptor.GetTripId(),
+			ServiceDate:                descriptor.GetStartDate(),
+			StartTime:                  descriptor.GetStartTime(),
+			ScheduleRelationship:       descriptor.GetScheduleRelationship().String(),
+			Stops:                      stopPredictions(update.GetStopTimeUpdate()),
+			TripDelaySeconds:           update.Delay,
+			DirectionID:                descriptor.DirectionId,
+			Direction:                  direction(descriptor, ""),
+			PositionBasis:              realtime.PositionBasisRealtimePrediction,
+			MovementState:              movementState(vehicle),
+			SourceTimestamp:            sourceTimestamp,
+			TripUpdateTimestamp:        observationTimestamp(update.Timestamp),
+			TripUpdateTimestampPresent: update.Timestamp != nil,
+			VehicleEntityID:            vehicleEntity.GetId(),
+			VehicleTimestamp:           vehicleTimestamp,
+			VehicleMatch:               match,
+		}
+		if vehicle != nil {
+			train.VehicleTimestampPresent = vehicle.Timestamp != nil
+			train.VehicleStopID = vehicle.GetStopId()
+			train.VehicleStopSequence = vehicle.CurrentStopSequence
+			if vehicle.CurrentStatus != nil {
+				train.VehicleStatus = vehicle.GetCurrentStatus().String()
+			}
 		}
 		if proto.HasExtension(descriptor, gtfs.E_NyctTripDescriptor) {
 			if ext, ok := proto.GetExtension(descriptor, gtfs.E_NyctTripDescriptor).(*gtfs.NyctTripDescriptor); ok && ext.Direction != nil {
@@ -285,6 +294,7 @@ func stopEvent(event *gtfs.TripUpdate_StopTimeEvent) *realtime.StopEvent {
 	normalized := &realtime.StopEvent{DelaySeconds: event.Delay, Uncertainty: event.Uncertainty}
 	if event.Time != nil {
 		normalized.Time = time.Unix(*event.Time, 0).UTC()
+		normalized.TimePresent = true
 	}
 	if event.ScheduledTime != nil {
 		normalized.ScheduledTime = time.Unix(*event.ScheduledTime, 0).UTC()
