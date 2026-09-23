@@ -5,6 +5,7 @@ package projection
 import (
 	"encoding/base64"
 	"encoding/json"
+	"slices"
 	"sort"
 	"time"
 
@@ -32,7 +33,12 @@ type Position struct {
 	PatternID                  string
 	ScheduleVersion            string
 	Latitude, Longitude        *float64
+	ShapeDistanceMeters        float64
+	NextStationID              string
+	NextStopSequence           *uint32
+	NextArrivalAt              time.Time
 	ProjectionTime             time.Time
+	PredictedDepartureAt       time.Time
 	PositionBasis              realtime.PositionBasis
 	MovementState              realtime.MovementState
 	SourceTimestamp            time.Time
@@ -50,9 +56,9 @@ type Position struct {
 	InterpolationMethod        string
 	ReconciliationOutcome      reconcile.Outcome
 	ReconciliationReason       string
+	ReconciliationWarnings     []string
 	FallbackReason             string
 	NullReason                 string
-	distanceMeters             float64
 }
 
 // Positions preserves each attributable trip update, including duplicates and
@@ -74,6 +80,10 @@ func Positions(b *reconcile.Bundle, routeID string, now time.Time) []Position {
 			ProjectionTime: now, PositionBasis: realtime.PositionBasisRealtimePrediction, MovementState: realtime.MovementStateUnknown,
 			ScheduleVersion: meta.Schedule.Version, ScheduleValidatedAt: meta.Schedule.ValidatedAt,
 			ReconciliationOutcome: m.Outcome, ReconciliationReason: m.Reason}
+		p.ReconciliationWarnings = append([]string{}, m.Warnings...)
+		for _, stop := range m.Stops {
+			p.ReconciliationWarnings = append(p.ReconciliationWarnings, stop.Warnings...)
+		}
 		if p.Direction == "" {
 			p.Direction = realtime.DirectionUnknown
 		}
@@ -99,6 +109,8 @@ func Positions(b *reconcile.Bundle, routeID string, now time.Time) []Position {
 		}
 		selectPosition(&p, b, m, now)
 		checkVehicleInterval(&p, b, m)
+		slices.Sort(p.ReconciliationWarnings)
+		p.ReconciliationWarnings = slices.Compact(p.ReconciliationWarnings)
 		out = append(out, p)
 	}
 	if b.ScheduleEligible(now) {
@@ -163,7 +175,7 @@ func setInstance(p *Position, b *reconcile.Bundle, instance reconcile.Instance) 
 // Fresh current-stop evidence constrains an inferred moving position to the
 // incoming segment. A compatible clock interval alone cannot override it.
 func checkVehicleInterval(p *Position, b *reconcile.Bundle, m reconcile.Match) {
-	if p.Latitude == nil || p.PositionBasis != realtime.PositionBasisRealtimePrediction || p.VehicleFreshness != realtime.FreshnessFresh || m.Train.VehicleMatch != realtime.VehicleMatched || m.VehicleStop == nil || (m.Train.VehicleStatus != "IN_TRANSIT_TO" && m.Train.VehicleStatus != "INCOMING_AT") {
+	if p.Latitude == nil || p.PositionBasis != realtime.PositionBasisRealtimePrediction || p.VehicleFreshness != realtime.FreshnessFresh || m.Train.VehicleMatch != realtime.VehicleMatched || m.VehicleStop == nil || m.VehicleStop.Outcome != reconcile.Matched || (m.Train.VehicleStatus != "IN_TRANSIT_TO" && m.Train.VehicleStatus != "INCOMING_AT") {
 		return
 	}
 	pattern, _ := b.Schedule().Dataset().TripPattern(m.Instance.TripID)
@@ -181,7 +193,7 @@ func checkVehicleInterval(p *Position, b *reconcile.Bundle, m reconcile.Match) {
 		}
 		from--
 	}
-	if from < 0 || to >= len(pattern.Stops) || !pattern.Stops[from].HasDistance || !pattern.Stops[to].HasDistance || p.distanceMeters < pattern.Stops[from].DistanceMeters || p.distanceMeters > pattern.Stops[to].DistanceMeters {
+	if from < 0 || to >= len(pattern.Stops) || !pattern.Stops[from].HasDistance || !pattern.Stops[to].HasDistance || p.ShapeDistanceMeters < pattern.Stops[from].DistanceMeters || p.ShapeDistanceMeters > pattern.Stops[to].DistanceMeters {
 		p.Latitude, p.Longitude, p.InterpolationMethod = nil, nil, ""
 		p.MovementState, p.NullReason = realtime.MovementStateUnknown, "vehicle_interval_conflict"
 	}
@@ -212,6 +224,15 @@ func selectPosition(p *Position, b *reconcile.Bundle, m reconcile.Match, now tim
 		return
 	}
 	trip, _ := b.Schedule().Dataset().Trip(m.Instance.TripID)
+	if p.TripUpdateFreshness == realtime.FreshnessFresh && m.VehicleStop != nil && m.VehicleStop.Reason == "stop_id_sequence_conflict" {
+		byID := reconcile.ResolveStop(realtime.StopPrediction{StopID: m.Train.VehicleStopID}, trip.Stops)
+		if byID.Outcome == reconcile.Matched {
+			// Exclude only this projection's optional observation. The bundle keeps
+			// the raw conflict, including its veto on stale schedule simulation.
+			m.VehicleStop = nil
+			p.ReconciliationWarnings = append(p.ReconciliationWarnings, "vehicle_stop_sequence_conflict_ignored")
+		}
+	}
 	if reason := reconcile.PositionEvidenceReason(m, trip); reason != "" {
 		p.NullReason = reason
 		return
@@ -227,19 +248,7 @@ func selectPosition(p *Position, b *reconcile.Bundle, m reconcile.Match, now tim
 		simulate(p, b, m.Instance, now)
 		return
 	}
-	t, pattern, shape, ok := geometry(p, b, m.Instance)
-	if !ok {
-		return
-	}
-	if m.Train.VehicleStatus == "STOPPED_AT" && m.Train.VehicleMatch == realtime.VehicleMatched && p.VehicleFreshness == realtime.FreshnessFresh && m.VehicleStop != nil {
-		index := m.VehicleStop.ScheduledIndex
-		if coordinate(p, pattern, shape, index, index, 0) {
-			p.InterpolationMethod, p.MovementState = "vehicle_stop", realtime.MovementStateReportedStopped
-			p.ObservationTime, p.ObservationBasis = p.VehicleTimestamp, "vehicle"
-			return
-		}
-		return
-	}
+	t := trip
 	times := make([]stopTimes, len(t.Stops))
 	for _, stop := range m.Stops {
 		u := m.Train.Stops[stop.UpdateIndex]
@@ -251,6 +260,28 @@ func selectPosition(p *Position, b *reconcile.Bundle, m reconcile.Match, now tim
 		}
 		times[i].arrival, times[i].arrivalMethod, _ = eventTime(u.Arrival, m.Train.TripDelaySeconds, t.Stops[i].Arrival, m.Instance.ServiceDate)
 		times[i].departure, times[i].departureMethod, _ = eventTime(u.Departure, m.Train.TripDelaySeconds, t.Stops[i].Departure, m.Instance.ServiceDate)
+	}
+	reportedStopped := m.Train.VehicleStatus == "STOPPED_AT" && m.Train.VehicleMatch == realtime.VehicleMatched && p.VehicleFreshness == realtime.FreshnessFresh && m.VehicleStop != nil
+	if first := times[0]; !reportedStopped && !first.skipped && !first.blocked && first.departure.After(now) && (first.arrival.IsZero() || first.arrival.After(now)) {
+		p.NullReason, p.PredictedDepartureAt = "not_started", first.departure
+		return
+	}
+	_, pattern, shape, ok := geometry(p, b, m.Instance)
+	if !ok {
+		return
+	}
+	defer func() {
+		if p.Latitude != nil {
+			setNextStop(p, pattern, times)
+		}
+	}()
+	if reportedStopped {
+		index := m.VehicleStop.ScheduledIndex
+		if coordinate(p, pattern, shape, index, index, 0) {
+			p.InterpolationMethod, p.MovementState = "vehicle_stop", realtime.MovementStateReportedStopped
+			p.ObservationTime, p.ObservationBasis = p.VehicleTimestamp, "vehicle"
+		}
+		return
 	}
 	if interpolate(p, pattern, shape, times, now, false) {
 		return
@@ -319,7 +350,9 @@ func simulate(p *Position, b *reconcile.Bundle, instance reconcile.Instance, now
 			times[i].departure = instance.ServiceDate.Instant(s.Departure.Seconds)
 		}
 	}
-	interpolate(p, pattern, shape, times, now, true)
+	if interpolate(p, pattern, shape, times, now, true) {
+		setNextStop(p, pattern, times)
+	}
 }
 
 type stopTimes struct {
@@ -409,12 +442,34 @@ func coordinate(p *Position, pattern schedule.Pattern, shape schedule.Shape, fro
 		p.NullReason = "invalid_distance_interval"
 		return false
 	}
-	p.distanceMeters = a.DistanceMeters + (b.DistanceMeters-a.DistanceMeters)*fraction
-	lat, lon, ok := shape.At(p.distanceMeters)
+	p.ShapeDistanceMeters = a.DistanceMeters + (b.DistanceMeters-a.DistanceMeters)*fraction
+	lat, lon, ok := shape.At(p.ShapeDistanceMeters)
 	if !ok {
 		p.NullReason = "invalid_shape_distance"
 		return false
 	}
 	p.Latitude, p.Longitude, p.NullReason = &lat, &lon, ""
 	return true
+}
+
+func setNextStop(p *Position, pattern schedule.Pattern, times []stopTimes) {
+	current := -1
+	for i, stop := range pattern.Stops {
+		if stop.HasDistance && stop.DistanceMeters <= p.ShapeDistanceMeters {
+			current = i
+		}
+	}
+	for i := current + 1; i < len(pattern.Stops) && i < len(times); i++ {
+		if times[i].skipped {
+			continue
+		}
+		p.NextStationID = pattern.Stops[i].StationID
+		sequence := pattern.Stops[i].Sequence
+		p.NextStopSequence = &sequence
+		p.NextArrivalAt = times[i].arrival
+		if p.NextArrivalAt.IsZero() {
+			p.NextArrivalAt = times[i].departure
+		}
+		return
+	}
 }

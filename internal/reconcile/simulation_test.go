@@ -44,7 +44,7 @@ func TestSimulationStalePresentAndFreshRecovery(t *testing.T) {
 
 func TestSimulationPermissionVetoes(t *testing.T) {
 	instance := Instance{staticID, date}
-	matched := realtime.Train{TripID: staticID, RouteID: "A", ServiceDate: string(date)}
+	matched := realtime.Train{TripID: staticID, RouteID: "A", ServiceDate: string(date), StartTime: "09:00:00"}
 	tests := []struct {
 		name    string
 		edit    func(*Source)

@@ -148,6 +148,7 @@ func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset) {
 		return
 	}
 	var compatible []Instance
+	var warnings []string
 	var potential []Instance
 	reason := "service_inactive_or_outside_coverage"
 	for _, candidate := range selected {
@@ -158,12 +159,18 @@ func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset) {
 				m.Rejections = append(m.Rejections, Rejection{instance, "service_inactive_or_outside_coverage"})
 				continue
 			}
-			if conflict := identityConflict(train, id, candidate); conflict != "" {
+			conflict := identityConflict(train, id, candidate)
+			tolerated := conflict == "start_time_conflict" && (m.Rule == "exact_id" || m.Rule == "origin_path")
+			if conflict != "" && !tolerated {
 				reason = conflict
 				m.Rejections = append(m.Rejections, Rejection{instance, conflict})
 				continue
 			}
 			compatible = append(compatible, instance)
+			warnings = nil
+			if tolerated {
+				warnings = []string{conflict}
+			}
 		}
 	}
 	m.Candidates = compatible
@@ -173,6 +180,7 @@ func matchTrip(m *Match, trips []staticTrip, dataset *schedule.Dataset) {
 		m.Outcome, m.Reason = Invalid, reason
 	case 1:
 		m.Outcome, m.Reason = Matched, "unique_identity"
+		m.Warnings = warnings
 	default:
 		m.Outcome, m.Reason = Ambiguous, "multiple_scheduled_instances"
 	}
@@ -197,6 +205,13 @@ func identityConflict(train realtime.Train, id identity, candidate staticTrip) s
 			return "identifier_path_conflict"
 		}
 	}
+	// Check every other supplied identity field before allowing a start-time
+	// disagreement to become a warning for a stronger identity rule.
+	if train.NYCTDirection != nil {
+		if !staticID.known || *train.NYCTDirection == realtime.DirectionUnknown || *train.NYCTDirection != nyctDirection(staticID.direction) || (id.known && *train.NYCTDirection != nyctDirection(id.direction)) {
+			return "nyct_direction_conflict"
+		}
+	}
 	if train.StartTime != "" {
 		at, ok := parseStart(train.StartTime)
 		if !ok {
@@ -206,15 +221,10 @@ func identityConflict(train realtime.Train, id identity, candidate staticTrip) s
 			return "start_time_conflict"
 		}
 	}
-	if train.NYCTDirection != nil {
-		if !staticID.known || *train.NYCTDirection == realtime.DirectionUnknown || *train.NYCTDirection != nyctDirection(staticID.direction) || (id.known && *train.NYCTDirection != nyctDirection(id.direction)) {
-			return "nyct_direction_conflict"
-		}
-	}
 	return ""
 }
 
-func resolveStops(updates []realtime.StopPrediction, stops []schedule.StopTime) []StopResolution {
+func resolveStops(updates []realtime.StopPrediction, stops []schedule.StopTime, tolerateIDConflict bool) []StopResolution {
 	out := make([]StopResolution, len(updates))
 	counts := map[int]int{}
 	for i, update := range updates {
@@ -239,7 +249,20 @@ func resolveStops(updates []realtime.StopPrediction, stops []schedule.StopTime) 
 			j := candidates[0]
 			if update.StopID != "" && update.StopID != stops[j].StopID {
 				result.Reason = "stop_id_sequence_conflict"
-			} else {
+				if tolerateIDConflict {
+					var byID []int
+					for k, stop := range stops {
+						if stop.StopID == update.StopID {
+							byID = append(byID, k)
+						}
+					}
+					if len(byID) == 1 {
+						j = byID[0]
+						result.Warnings = []string{"stop_id_sequence_conflict"}
+					}
+				}
+			}
+			if update.StopID == "" || update.StopID == stops[j].StopID {
 				result.ScheduledIndex, result.StopID, result.Sequence = j, stops[j].StopID, stops[j].Sequence
 				result.Outcome, result.Reason = Matched, "resolved"
 				counts[j]++
@@ -288,12 +311,17 @@ func resolveStops(updates []realtime.StopPrediction, stops []schedule.StopTime) 
 		}
 		lowest = min(lowest, out[i].ScheduledIndex)
 	}
+	for i := range out {
+		if out[i].Outcome != Matched {
+			out[i].Warnings = nil
+		}
+	}
 	return out
 }
 
-// ResolveStop uses the same occurrence rules for a matched vehicle observation.
+// ResolveStop keeps ID/sequence agreement strict for vehicle observations.
 func ResolveStop(update realtime.StopPrediction, stops []schedule.StopTime) StopResolution {
-	return resolveStops([]realtime.StopPrediction{update}, stops)[0]
+	return resolveStops([]realtime.StopPrediction{update}, stops, false)[0]
 }
 
 // MatchRoutes retains conflicting route evidence so each affected route can

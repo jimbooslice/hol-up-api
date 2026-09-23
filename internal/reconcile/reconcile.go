@@ -65,6 +65,7 @@ type StopResolution struct {
 	Sequence       uint32
 	Outcome        Outcome
 	Reason         string
+	Warnings       []string
 }
 
 type Rejection struct {
@@ -80,6 +81,7 @@ type Match struct {
 	Rule         string
 	Outcome      Outcome
 	Reason       string
+	Warnings     []string
 	Rejections   []Rejection
 	Candidates   []Instance
 	Instance     Instance // Set only for a unique match, including cancellations.
@@ -158,9 +160,14 @@ func (b *Bundle) Matches() []Match {
 			m.Train = m.Train.Clone()
 			m.Candidates = slices.Clone(m.Candidates)
 			m.Rejections = slices.Clone(m.Rejections)
+			m.Warnings = slices.Clone(m.Warnings)
 			m.Stops = slices.Clone(m.Stops)
+			for i := range m.Stops {
+				m.Stops[i].Warnings = slices.Clone(m.Stops[i].Warnings)
+			}
 			if m.VehicleStop != nil {
 				stop := *m.VehicleStop
+				stop.Warnings = slices.Clone(stop.Warnings)
 				m.VehicleStop = &stop
 			}
 			out = append(out, m)
@@ -268,7 +275,7 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 					m.Instance = m.Candidates[0]
 					trip, _ := version.Dataset().Trip(m.Instance.TripID)
 					m.Owned = slices.Contains(p.Routes, trip.RouteID)
-					m.Stops = resolveStops(m.Train.Stops, trip.Stops)
+					m.Stops = resolveStops(m.Train.Stops, trip.Stops, true)
 					if m.Train.VehicleMatch == realtime.VehicleMatched && (m.Train.VehicleStopID != "" || m.Train.VehicleStopSequence != nil) {
 						stop := ResolveStop(realtime.StopPrediction{StopID: m.Train.VehicleStopID, Sequence: m.Train.VehicleStopSequence}, trip.Stops)
 						m.VehicleStop = &stop
@@ -313,6 +320,7 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 		for j := range source.matches {
 			m := &source.matches[j]
 			if m.Outcome != Matched {
+				m.Warnings = nil
 				continue
 			}
 			trip, _ := version.Dataset().Trip(m.Instance.TripID)
@@ -325,6 +333,10 @@ func Reconcile(version *schedule.Version, sources []Source, now time.Time, stale
 			if reason != "" {
 				source.blocked[m.Instance] = true
 				m.Outcome, m.Reason, m.Instance = Ambiguous, reason, Instance{}
+				m.Warnings = nil
+				for k := range m.Stops {
+					m.Stops[k].Warnings = nil
+				}
 			}
 		}
 	}

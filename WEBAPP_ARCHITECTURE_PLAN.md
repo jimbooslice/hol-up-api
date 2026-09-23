@@ -43,13 +43,16 @@ No backend contract change is required for the PoC.
 Use React, TypeScript, and Vite in `web/`. Integrate MapLibre directly from a
 React effect instead of adding a React map wrapper. Use normal React state and
 small pure functions; do not add a router, global state library, query library,
-component system, or CSS framework.
+component system, or CSS framework for the current PoC. Keep plain CSS for the
+page and React components; MapLibre layers retain their separate TypeScript
+paint/layout definitions. Reconsider Tailwind only at the adoption triggers
+below.
 
-Runtime dependencies (installed as each phase needs them):
+Runtime dependencies:
 
 - `react`
 - `react-dom`
-- `maplibre-gl` in Phase 2
+- `maplibre-gl`
 
 Development dependencies:
 
@@ -57,30 +60,46 @@ Development dependencies:
 - `@vitejs/plugin-react`
 - `typescript`
 - React and Node type packages
-- `@playwright/test` when Phase 3 adds browser tests
+- `@playwright/test`
 
 Commit `web/package-lock.json`. Keep `web/node_modules/` and `web/dist/`
 ignored. Use the Node 24 image line in the container build so local and
 container tooling can run TypeScript tests directly.
 
-Expected scripts:
+Current scripts:
 
 ```json
 {
   "scripts": {
     "dev": "vite",
+    "test": "node --test --test-isolation=none src/*.test.ts",
+    "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "build": "npm run typecheck && vite build"
   }
 }
 ```
 
-Phase 3 adds `"test": "node --test src/model.test.ts"` with its test file,
-and `@playwright/test` with the `"test:e2e": "playwright test"` script.
+Phase 3 extends the existing Node and Playwright suites with position-state
+and polling tests. Both test commands are implemented.
 
 Do not add a frontend linter in the PoC. TypeScript, focused unit tests, the
 production build, and browser tests cover the current failure surface. Add a
 linter when repeated style or correctness problems establish a useful ruleset.
+
+### Product decision: overlapping train markers (2026-09-22)
+
+The user found the HUP-14 counter/chooser confusing and visually disliked it.
+Do not use count or counter badges, or their associated marker chooser, for
+co-located train markers unless the user explicitly reverses this decision.
+The grouping/chooser implementation is removed; its
+[archived algorithm reference](docs/optimization/train-marker-grouping.md) is
+historical only. Individual train markers may overlap. This accepts the current
+pointer reachability limitation for markers hidden beneath another marker; the
+complete train list and keyboard navigation remain available as the accessible
+ways to reach every train. HUP-16 remains deferred and owns any later measured
+decluttering policy; it does not authorize restoring the rejected counter/chooser
+pattern.
 
 ### Map renderer and basemap
 
@@ -187,7 +206,7 @@ breakpoint are sufficient.
 
 ### Transit visualization
 
-Create three MapLibre GeoJSON sources and update them through `setData`:
+Create separate MapLibre GeoJSON sources for static geometry:
 
 - **Route shapes:** include only shape features with usable LineString geometry.
   Draw each branch as supplied. Use a dark casing plus an A-line blue inner
@@ -196,14 +215,22 @@ Create three MapLibre GeoJSON sources and update them through `setData`:
 - **Stations:** include canonical stations with valid Point geometry. Draw
   outlined circles above the route. Show station names at closer zoom levels;
   retain unlocated stations and their reasons in the HTML list.
-- **Trains:** include records with finite longitude and latitude. Use filled
-  circles for `realtime_prediction` and hollow rings for
-  `schedule_fallback`. Use shape plus text in the legend so color is not the only
-  distinction.
+- **Trains:** render records with finite longitude and latitude as native HTML
+  controls over the map. Use compact route-letter badges with a slate outer
+  ring: filled for `realtime_prediction` and hollow for `schedule_fallback`.
+  Individual markers may overlap; see the persistent product decision above.
+  Hover/focus uses a dashed ring. Click/tap pins the badge with an amber
+  ring at its anchor, without introducing another collision through displacement. A second
+  hover temporarily overrides the pinned view and restores it on mouse-out.
 
 Fit the camera to valid route geometry after the first successful geometry
-load. Add a "Fit A line" button. Polling and train selection must not recenter
-the user's map.
+load. Add a "Fit A line" button. Polling preserves the user's camera. Inspection
+first tries alternate card anchors away from every visible route, then accepts
+route overlap before using bounded temporary panning. Active cards stay on the
+map. Pinned details move below the map only through the explicit card control
+and can be restored on-map. Dismissal restores the preceding camera,
+unless the user deliberately navigated. Hover-over-selection has its own camera
+snapshot so leaving the preview restores the pinned view.
 
 Map clicks and HTML train buttons update the same selected-train state. Details
 may display only supplied facts: estimated/simulated basis, direction, movement
@@ -270,9 +297,9 @@ against known-mismatched geometry.
 
 ### Position polling
 
-Use one polling owner in a custom hook or the top-level application effect:
+Use one polling owner in `useTrainData`:
 
-1. Fetch immediately after compatible geometry is available.
+1. Fetch immediately after the initial geometry attempt completes, including failure.
 2. Set a ten-second `AbortController` timeout.
 3. Wait for the attempt to complete.
 4. Schedule the next attempt five seconds later.
@@ -399,19 +426,23 @@ and assistive-technology matrix below remains for the interactive PoC.
 
 Goal: show A-line context with or without the visual map.
 
+Status: complete.
+
 Tasks:
 
-- [ ] Implement the geometry fetch boundary and consumed API types.
-- [ ] Initialize one MapLibre instance, hide building detail, disable rotation
+- [x] Implement the geometry fetch boundary and consumed API types.
+- [x] Initialize one MapLibre instance, hide building detail, disable rotation
   and pitch, and provide the minimal-style fallback.
-- [ ] Convert usable shapes and located stations into separate GeoJSON sources.
-- [ ] Add route casing/line and station circle/label layers.
-- [ ] Fit the initial geometry and add "Fit A line."
-- [ ] Render all canonical stations in semantic HTML, including unlocated
+- [x] Convert usable shapes and located stations into separate GeoJSON sources.
+- [x] Add route casing/line and station circle/label layers.
+- [x] Fit the initial geometry and add "Fit A line."
+- [x] Render all canonical stations in semantic HTML, including unlocated
   stations and reasons.
-- [ ] Add loading, route-not-found, schedule-unavailable/ineligible, basemap
+- [x] Add loading, route-not-found, schedule-unavailable/ineligible, basemap
   failure, and WebGL failure presentations.
-- [ ] Add the hardcoded-style configuration TODO.
+- [x] Add focused Playwright coverage for loading, ready/warning, failure/retry,
+  keyboard access, and responsive layout using local fixtures.
+- [x] Add the hardcoded-style configuration TODO.
 
 Acceptance:
 
@@ -421,26 +452,67 @@ Acceptance:
   and operate "Fit A line."
 - Basemap or WebGL failure does not remove route status or station information.
 
+Implemented and verified on 2026-09-14:
+
+- The validated fetch boundary preserves timeout/cancellation during body reads;
+  an effect-generation guard suppresses stale success and failure after cleanup.
+  Coordinate ranges match the Go boundary. The complete alphabetical directory
+  uses English numeric collation and station IDs to resolve equal names.
+- `RouteMap` owns the map, north-up controls, first usable bounds fit, resize
+  observation, resource deadline, fallback, and cleanup. Sources retain supplied
+  shape order and string IDs (`promoteId`). Labels start at zoom 13; the local
+  fallback needs neither tiles nor glyphs. At Phase 2 completion, the A-only screen had no geometry refresh path;
+  Phase 3 below adds source updates without replacing the map.
+- MapLibre 6.9 is bundled through Vite, including its explicit worker import
+  under `/assets/`. Hosted-style errors and the initial deadline activate the
+  plain-background fallback. MapLibre uses its own local-font fallback if glyphs
+  are unavailable. No tile proxy or API changes.
+- Native Node tests, strict TypeScript, production build, and focused Chromium
+  fixture tests pass. Reviewed canvas snapshots show branches and station circles
+  at desktop and narrow widths.
+  Focused Go tests and `go vet` pass; the container smoke test verifies JavaScript,
+  CSS, and the actual bundled map worker through Go's asset dispatcher. The
+  container build also runs the complete Go test suite. No frontend linter is
+  configured; TypeScript remains the existing static check.
+- Live API validation used supplemented schedule
+  `supplemented:2:3760d3dc9e801486f1f0be26bb3ba5f7204bfbd57678bcee21bb80eb8748298f`,
+  validated at `2026-09-14T17:19:19Z`, eligible at inspection: 78 canonical stations,
+  25 usable shapes, zero missing station coordinates and zero unusable shapes.
+  Chromium rendered it over hosted Positron without console errors. The live
+  screenshot was reviewed for geographic alignment and visible branches.
+  Installed Firefox 155 also rendered the live map with one canvas, all 78
+  stations, no overflow at 1440/390/320 pixels, working native skip-link focus,
+  and no console errors; its directory screenshot was reviewed.
+
+Remaining verification gaps: a hands-on Safari check and a screen-reader pass
+have not been performed in this Linux environment. Firefox verification used
+WebDriver BiDi and screenshot inspection, not a complete manual interaction
+pass. Live inspection is a single schedule snapshot, not an audit of every
+service pattern or future schedule publication. Phase 3 verification is recorded below.
+
 ### Phase 3 — Trustworthy positions and update lifecycle
 
 Goal: show train positions without hiding uncertainty or age.
 
+Status: complete.
+
 Tasks:
 
-- [ ] Implement the non-overlapping positions loop, abort/generation cleanup,
+- [x] Implement the non-overlapping positions loop, abort/generation cleanup,
   page-visibility behavior, and pause/resume control.
-- [ ] Implement version matching and coordinated geometry refresh.
-- [ ] Convert valid train coordinates to GeoJSON and update one MapLibre source
-  per accepted response.
-- [ ] Add distinct realtime and schedule-simulation styling and a textual
+- [x] Implement version matching and coordinated geometry refresh.
+- [x] Project valid train coordinates into a native HTML marker overlay per
+  accepted response.
+- [x] Add distinct realtime and schedule-simulation styling and a textual
   legend.
-- [ ] Render every outcome in a stable, focus-preserving HTML train list.
-- [ ] Synchronize map and list selection with a semantic detail section.
-- [ ] Implement monotonic source aging and separate stale, simulation, retained,
+- [x] Render every outcome in a stable, focus-preserving HTML train list.
+- [x] Synchronize map and list selection with a semantic detail section.
+- [x] Implement monotonic source aging and separate stale, simulation, retained,
   paused, unavailable, and recovery notices.
-- [ ] Keep frozen coordinates fixed after transport failure.
-- [ ] Add pure TypeScript tests for response decisions and Playwright tests for
-  the browser lifecycle using local fixtures.
+- [x] Keep frozen coordinates fixed after transport failure.
+- [x] Add pure TypeScript tests for response decisions and Playwright tests for
+  the positions polling lifecycle using local fixtures, extending the Phase 2
+  browser suite.
 
 Acceptance:
 
@@ -455,6 +527,269 @@ Acceptance:
 - Pausing stops requests, resuming fetches current data, and background tabs do
   not accumulate polls.
 - Polling does not steal focus, recenter the map, or repeatedly announce changes.
+
+Implemented in three increments on 2026-09-15:
+
+1. **Validated polling and cleanup.** `useTrainData` owns initial and manual
+   geometry requests, coordinated refreshes, positions polling, retained
+   snapshots, cancellation generations, visibility, and presentation ticks.
+   Positions start after the initial geometry attempt even if it fails. Each
+   fetch has a cleared ten-second deadline covering JSON body reading; each
+   cycle schedules its successor five seconds after completion. Pausing,
+   hiding, and unmounting abort active work and clear timers. Resume/visibility
+   restoration fetch immediately when permitted and retain the snapshot label
+   until a validated success. Runtime checks cover consumed Go/OpenAPI fields,
+   enums, nullable timestamps, signed ages, coordinate pairs, per-record route
+   and schedule consistency, and identity collisions. Invalid responses cannot
+   replace accepted data; valid empty collections do replace it. Source and
+   schedule unavailability, timeout, network, HTTP, and validation failures have
+   distinct notices.
+2. **Version-safe map updates.** Geometry and positions retain separate versions.
+   Only matching non-null versions publish markers. A different non-null
+   positions version requests geometry and, after success, positions again;
+   continued disagreement or refresh failure waits for the next five-second
+   cycle. Missing geometry can recover manually or from later positions.
+   `RouteMap` keeps its map instance, fits first usable bounds or the explicit
+   control, allows reversible inspection camera adjustments, and reinstalls the latest accepted sources after
+   fallback. It suspends train interactions before source changes, serializes source writes,
+   awaits MapLibre's promises and loaded source tiles at idle, and checks a
+   revision before revealing. Obsolete style/source completions cannot reveal
+   trains. An HTML marker overlay supplies high-contrast route badges with filled
+   realtime inference and hollow schedule simulation treatments. Selection uses
+   the matching shape, pattern and cumulative distance to highlight visited and
+   upcoming route segments; replacement removes missing/null markers. The HTML
+   panel states how many outcomes have publishable coordinates
+   and groups the supplied reason codes with plain-language explanations. Blocking
+   reasons distinguish rejected trip identity (`start_time_conflict`),
+   rejected stop evidence (`stop_id_sequence_conflict`), and a matched run lacking
+   a safe interval around the current time (`insufficient_timing`).
+3. **Accessible outcomes and trust signals.** Every outcome has a keyed native
+   selection button and supplied evidence/reasons, including unpositioned and
+   uncertain records. Identities use namespaced run IDs, source record IDs, or
+   JSON source/entity/index tuples. Stable identity ordering avoids moving
+   focused DOM nodes when server order changes. Map and list share selection;
+   removal clears details, focuses the train heading, and announces removal.
+   Signed ages advance from server evidence plus monotonic time since request
+   start, independently for source and observation. Missing/future times stay
+   explicit; source evidence becomes stale strictly above 60 seconds or when
+   reported stale. Pause/hidden states suspend ticks, resume recomputes elapsed
+   age, and transport failures freeze coordinates while evidence ages.
+   Retained simulations use past tense. Live regions contain transitions, not
+   poll timestamps or age ticks. No browser movement prediction was added.
+
+Verification on 2026-09-15:
+
+- 37 native Node tests pass, including the original 29 geometry tests and new
+  validation, identity, replacement, version, signed-age, stale-boundary, and
+  fetch/body-read checks. Strict TypeScript and production build pass. No
+  frontend linter is configured; the existing MapLibre bundle-size warning
+  remains.
+- 36 deterministic Chromium tests pass. The original geometry tests use explicit
+  empty train fixtures. New coverage includes production train rendering and
+  a test-only Vite harness using the real App and MapLibre under Strict Mode:
+  slow requests, exact completion-relative retries, body-read timeout,
+  cancellation, late completions, pause/hidden/unmount, recovery, null/removed
+  markers, repeated versions, geometry failure, delayed source writes and style
+  fallback, shared selection, reordered-list focus, escaped API strings,
+  independent trust signals, camera preservation, and reduced motion.
+- Layout assertions cover 1440, 390, and 320 CSS pixels, including WebGL failure.
+  Desktop and narrow screenshots with realtime and simulated trains were
+  visually inspected. Original geometry screenshot baselines still pass.
+- `go test ./...`, `go test -race ./...`, `go vet ./...`, and the Podman container
+  smoke check pass. Smoke verification includes the bundled JavaScript, CSS,
+  MapLibre worker, and unchanged API error responses through the Go server.
+
+Live follow-up on 2026-09-15 sampled 37 A-line outcomes with no publishable
+coordinates: 15 `insufficient_timing`, 10 `start_time_conflict`, and 12
+`stop_id_sequence_conflict`. An immediately earlier sample briefly had one
+positioned train, so this records observed feed behavior rather than a stable
+coverage metric.
+
+Verification limits: Safari and a hands-on screen-reader pass are unavailable
+in this Linux session. Phase 3 browser verification uses Chromium; the earlier
+Firefox check covered Phase 2 only. Visibility events and delayed body/source
+completions are controlled fixtures, not browser throttling measurements.
+The live follow-up did not repeat basemap verification. The test-only harness is
+served by the development test server and is absent from `dist`.
+
+### Phase 3 map interaction follow-ups
+
+- [ ] **HUP-14 — reconsider co-located markers.** The counter/chooser
+  implementation was rejected on 2026-09-22 because it was confusing and
+  visually disliked. Markers now overlap; the train list and keyboard navigation
+  remain available for every train. Do not restore that pattern unless the user
+  explicitly reverses the product decision.
+- [ ] **HUP-16 — Zoom-responsive map decluttering.** Measure desktop/mobile
+  zoom values, then set shared thresholds for scaled train/station/route
+  rendering and for hiding train controls at low zoom. Include the low-zoom
+  marker density and viewport-edge clipping. It must preserve the 2026-09-22
+  decision against count/counter badges and their associated chooser UI.
+
+The page remains fluid with responsive gutters, a flexible map and 360px
+sidebar at 1024px and above, and stacked content below. Map height is
+`clamp(480px, 70dvh, 800px)` wide and `clamp(320px, 55dvh, 560px)` stacked.
+Resize updates the existing map without refitting the camera. Mobile web is
+supported with 44px controls and cooperative map gestures.
+
+Rollback verification (2026-09-22): native frontend tests, strict TypeScript,
+production build, and all 60 Chromium browser tests pass. Regression coverage
+asserts separate coincident marker targets, no counters/chooser, keyboard/list
+selection of obscured trains, and focus retention after reordered polling.
+Responsive layout checks pass at 1920, 1440, 1024, 768, 390, and 320px; desktop
+and mobile screenshots were inspected. The collision algorithm exists only in
+the inactive documentation reference. No frontend linter is configured; Safari
+and hands-on screen-reader verification remain unavailable.
+
+Superseded HUP-14 verification (2026-09-21; retained as historical evidence,
+not a specification to restore the rejected UI):
+
+- All 51 native frontend tests pass, including deterministic hit-target grouping,
+  exact/transitive overlaps, projection changes, and viewport boundaries.
+- The full 66-test Chromium suite passed. After the final large-text spacing
+  adjustment and an additional constrained-map case, all 11 affected layout
+  checks passed (67 browser cases existed in the suite then).
+- Browser coverage includes pointer/touch/keyboard selection, focus retention,
+  polling additions/removals, zoom regrouping, mixed-route component geometry,
+  camera preservation, docked details, and delayed source/style replacement.
+- Reviewed screenshots at 1920, 1440, 1024, 768, 390, and 320px; checked crowded
+  groups and 200% text with a long destination label. Updated and verified the
+  intentional map layout screenshot baselines.
+- Strict TypeScript and production build pass. No frontend linter is configured;
+  the existing MapLibre bundle-size warning remains. `git diff --check` passes.
+- Safari and hands-on screen-reader checks remain unavailable. No live
+  multi-route verification or device performance measurements are claimed.
+
+### Phase 3 follow-up — tolerant conflict handling
+
+Status: implemented; Phase 4 animation remains separate.
+
+Decision: improve position coverage by treating selected realtime/static
+conflicts as warnings when stronger evidence still identifies one safe result.
+The relaxation is narrow:
+
+- For `start_time_conflict`, an exact realtime `trip_id` or unique origin/path
+  suffix may remain matched when every other supplied identity field (including
+  NYCT direction) agrees with one active scheduled instance in the captured
+  schedule. Omitted optional fields retain existing semantics. The weaker
+  origin/route/direction rule remains strict; malformed start times are rejected.
+  Tolerant candidates participate in all existing uniqueness checks, including
+  duplicate records/sources, incomplete snapshots, ambiguous service dates, and
+  conflicting ownership. Accepted matches retain `matched` / `unique_identity`.
+- For `stop_id_sequence_conflict`, prefer a `stop_id` only when it occurs once in
+  the matched trip and the supplied sequence exists. Check duplicates and order
+  across all provisional associations in original feed order (`InputIndex`).
+  Accepted corrections retain the ignored sequence disagreement as a warning.
+  This correction applies only to trip updates; vehicle associations remain strict.
+  For fresh predictions, a vehicle `stop_id_sequence_conflict` whose ID identifies
+  one scheduled occurrence is excluded from projection, with warning
+  `vehicle_stop_sequence_conflict_ignored`. Its stopped-state and segment constraints
+  are excluded together. The immutable bundle retains the original conflict and
+  continues to veto stale simulation. Valid ID/sequence pairs still identify
+  repeated occurrences. Predictions and input identifiers are unchanged.
+- Keep a train unpositioned when identity is ambiguous, the stop ID is absent or
+  repeated, resolved stop order conflicts, versions differ, or coordinates would
+  require extrapolation. `insufficient_timing` is missing evidence rather than a
+  conflicting identifier, so this decision does not relax it.
+- A fresh validated future departure at the first scheduled occurrence is
+  `not_started`, with nullable `predicted_departure_at`, unknown movement and no
+  coordinates. Current predicted dwell or accepted fresh stopped evidence prevents
+  this classification. Evaluate it before geometry lookup, and reevaluate on each
+  server projection; the browser does not independently start movement. Assignment
+  flags are not used to infer lifecycle. List/details show "Upcoming" and the
+  departure in America/New_York time. Counts separate positioned, upcoming and
+  unavailable records; upcoming trips are excluded from the failure summary.
+- Publish a coordinate only through the existing validated shape interpolation
+  or dwell paths. Every positions record includes a sorted, deduplicated
+  `reconciliation_warnings: string[]`, including `[]`. Warnings remain separate
+  from `reconciliation_reason` and `no_position_reason`; accepted conflicts can
+  coexist with `insufficient_timing`. Immutable bundle copies include nested
+  warning collections. Authorized stale simulation retains the warnings, which
+  do not independently authorize coordinates or simulation. The vehicle-exclusion
+  warning applies only while fresh predictions permit that exclusion.
+- The shared `TrainInfo` renders a labeled warning section in both list and
+  selected details, explaining which evidence was preferred. Blocking conflicts
+  retain rejection wording. The browser accepts omitted warning arrays for
+  compatibility, rejects present fields that are not arrays of strings, and
+  renders unknown codes as escaped generic text. Retention keeps warnings;
+  a clean replacement clears them. No dependencies or runtime policy layer
+  were added; shared backend rules apply consistently across routes.
+
+Acceptance:
+
+- Fixture tests prove the tolerated cases resolve uniquely and retain warning
+  text; neighboring ambiguous cases remain null.
+- The frontend continues to reject malformed coordinates and version mismatch,
+  and visibly distinguishes a tolerated conflict in train details.
+- Record positioned/unpositioned counts before and after the change using the
+  same deterministic fixture and a labeled live sample. Do not define success
+  from a single volatile feed response.
+
+Verification record (2026-09-15):
+
+- `TestConflictCoverageFixture` uses evaluation and source time
+  `2026-09-02T16:05:00Z` and schedule version
+  `regular:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa`.
+  The baseline was run before changing reconciliation behavior. The same 14
+  fixture inputs now assert these outcomes:
+
+  | Fixture group | Before positioned / null | After positioned / null |
+  | --- | --- | --- |
+  | Clean exact and suffix matches | 2 / 0 | 2 / 0 |
+  | Exact and suffix start-time conflicts | 0 / 2 | 2 / 0 |
+  | Unique stop IDs with conflicting sequences | 0 / 1 | 1 / 0 |
+  | Both tolerated conflicts | 0 / 1 | 1 / 0 |
+  | Both conflicts without timing | 0 / 1 | 0 / 1 |
+  | Seven neighboring unsafe cases | 0 / 7 | 0 / 7 |
+  | **Total** | **2 / 12** | **6 / 8** |
+
+  Unsafe cases cover weaker identity, simultaneous NYCT direction conflict,
+  malformed start time, unknown sequence, absent stop ID, duplicate associations,
+  and original feed order conflicts. Before: six `start_time_conflict`, three
+  `stop_id_sequence_conflict`, and one each of `invalid_start_time`, `unknown_stop`,
+  and `conflicting_stop_order` blocked positioning. After: one each of
+  `insufficient_timing`, `start_time_conflict`, `nyct_direction_conflict`,
+  `invalid_start_time`, `unknown_stop`, `stop_id_sequence_conflict`,
+  `duplicate_stop_update`, and `conflicting_stop_order`. Warning counts are four
+  `start_time_conflict` and three `stop_id_sequence_conflict`; two corrected stops
+  in one record emit only one stop warning.
+- Reconciliation tests cover exact/suffix uniqueness across scheduled instances,
+  service dates, records and sources, incomplete sources, conflicting ownership,
+  repeated stop occurrences, strict vehicles, and immutable warning copies.
+  Timing tests run both with and without a start warning; simulation vetoes
+  retain cancellation, observation, ownership, relationship, and replacement
+  checks. The ZIP/protobuf integration fixture exercises ingestion normalization,
+  both warnings through HTTP, authorized stale simulation, failed refresh
+  retention, and warning removal on clean recovery under the same run ID.
+- OpenAPI examples are checked against actual DTO/projection output, including
+  empty warnings without a schedule and both warnings in realtime and simulation.
+  HTTP tests also assert warnings with `insufficient_timing` and empty arrays on
+  clean/absent scheduled runs.
+- `go test ./...`, `go test -race ./...`, `go vet ./...`, 38 native frontend tests,
+  TypeScript checking, the production build, all 38 Chromium Playwright tests,
+  and `test/container_smoke.sh` under Podman pass. Browser tests cover optional,
+  empty, multiple, unknown/escaped and malformed warnings, positioned and null
+  trains, selected details, retained simulations, and clean replacements.
+  Existing malformed-coordinate, version-mismatch, polling, geometry, and layout
+  checks pass. No frontend linter is configured; the existing MapLibre chunk-size
+  build warning remains.
+
+Labeled live observations from the local API against public MTA feeds:
+
+| Sample | Evaluation time (UTC) | ACE source timestamp (UTC) | Positioned / null | Reconciliation reasons | No-position reasons | Warning counts |
+| --- | --- | --- | --- | --- | --- | --- |
+| Before implementation | 2026-09-15T16:35:32Z | 2026-09-15T16:35:23Z | 0 / 38 | `unique_identity`: 29; `start_time_conflict`: 9 | `start_time_conflict`: 9; `stop_id_sequence_conflict`: 13; `insufficient_timing`: 16 | None; field absent in baseline API |
+| After implementation | 2026-09-15T16:45:11Z | 2026-09-15T16:44:41Z | 0 / 36 | `unique_identity`: 36 | `stop_id_sequence_conflict`: 20; `insufficient_timing`: 16 | `start_time_conflict`: 7; `stop_id_sequence_conflict`: 0 |
+
+Both samples used eligible schedule version
+`supplemented:2:c2b19bdbe33f064f9c1af38f3b27a210291db6de16fc080e48321595772c3613`.
+Live access succeeded after enabling networking for the local API; no live
+access blocker remained. Samples contain different realtime records roughly ten
+minutes apart, so they establish neither a controlled improvement nor regression.
+The after-sample demonstrates accepted start conflicts but **no live position
+coverage gain**: remaining stop/timing failures still block coordinates. The
+deterministic fixtures establish the intended coverage improvement and preserved
+rejections. Browser warning behavior was verified with controlled API responses;
+this follow-up did not repeat a live basemap or non-Chromium browser inspection.
 
 ### Phase 4 — MVP smooth movement
 
@@ -500,6 +835,7 @@ npm ci
 npm test
 npm run typecheck
 npm run build
+npx playwright install chromium
 npm run test:e2e
 
 cd ..
@@ -514,9 +850,9 @@ depend on live MTA or public tile availability. Manually verify current Chrome,
 Firefox, and Safari at desktop and narrow mobile widths, keyboard-only use,
 one screen-reader pass, reduced motion, and WebGL-disabled behavior.
 
-Live A-line alignment remains an explicit verification gap until checked with a
-current MTA schedule archive. Synthetic fixtures prove contract behavior, not
-live cartographic quality.
+The Phase 2 verification record above includes one current schedule and live
+basemap inspection. Synthetic fixtures establish contract and rendering behavior;
+repeat the separate live inspection when assessing a new schedule or map style.
 
 ## Deferred Complexity and Adoption Triggers
 
@@ -527,8 +863,10 @@ live cartographic quality.
 | Managed or self-hosted tiles | OpenFreeMap public Positron with a local blank fallback | Availability measurements or provider requirements justify an SLA, account, cost, or tile operations. |
 | Push transport | Five-second HTTP polling | Poll request load or measured update latency fails an agreed product target; evaluate Go SSE first. |
 | Shared frontend state or routing | Local React state on one page | Multiple real screens or cross-panel workflows make ownership unclear. |
+| Tailwind CSS | Plain CSS plus separate MapLibre style definitions | Repeated responsive/component styling becomes costly across several screens, or an agreed design-token system needs framework enforcement. |
 | Rich train labels and search | Identity, basis, direction, and timestamps only | Backend contracts provide destinations/next stops, or the product adds station/train search. |
 | Universal smooth animation | Snap per poll, then safe partial interpolation | MVP measurement shows ambiguous shape placement prevents acceptable coverage; add an along-shape locator. |
+| Stagehand browser automation | Deterministic Playwright tests from Phase 2 onward | A later workflow requires AI-directed browser interaction that fixed Playwright scenarios cannot express reliably. |
 
 The expensive decisions to preserve are server ownership of transit truth,
 explicit provenance and unknown states, schedule-version matching, and stable

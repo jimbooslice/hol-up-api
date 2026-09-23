@@ -15,9 +15,10 @@ import (
 func TestDocumentedPositionLifecycleMatchesProjection(t *testing.T) {
 	at := time.Date(2026, 9, 13, 4, 10, 0, 0, time.UTC)
 	v := geometryVersion(t, at, "a", -73.9)
-	trip := realtime.Train{TripID: "trip", EntityID: "update", RouteID: "A", ServiceDate: "20260913", VehicleMatch: realtime.VehicleUnmatched,
+	sequence := uint32(2)
+	trip := realtime.Train{TripID: "trip", EntityID: "update", RouteID: "A", ServiceDate: "20260913", StartTime: "00:10:00", VehicleMatch: realtime.VehicleUnmatched,
 		Stops: []realtime.StopPrediction{
-			{StopID: "platform", Departure: &realtime.StopEvent{Time: at.Add(-30 * time.Second)}},
+			{StopID: "platform", Sequence: &sequence, Departure: &realtime.StopEvent{Time: at.Add(-30 * time.Second)}},
 			{StopID: "second", Arrival: &realtime.StopEvent{Time: at.Add(570 * time.Second)}},
 		},
 	}
@@ -33,7 +34,9 @@ func TestDocumentedPositionLifecycleMatchesProjection(t *testing.T) {
 			t.Fatal(err)
 		}
 		if len(documented.Trains) != 1 || !reflect.DeepEqual(p, documented.Trains[0]) {
-			t.Fatalf("%s differs from actual projection: %+v", name, p)
+			actual, _ := json.Marshal(p)
+			want, _ := json.Marshal(documented.Trains[0])
+			t.Fatalf("%s differs from actual projection:\nactual: %s\nwant:   %s", name, actual, want)
 		}
 	}
 }

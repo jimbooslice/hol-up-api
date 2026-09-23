@@ -73,8 +73,14 @@ historical documented prefix and `BSP26GEN-A055-Sunday-00_000950_A..S74R` are
 supported. Origin units are integer 600 milliseconds; no rounding, nearest-time
 matching, aliases, or guessed identifier structure is used. Unknown IDs may
 match exactly or through separately supplied origin/route/direction fields.
-Every supplied identity field must agree with the selected candidate. Generic
-GTFS direction IDs are compared to static direction IDs; NYCT compass direction
+Every supplied identity field must agree with the selected candidate, with one
+exception: a valid conflicting `start_time` may be tolerated for exact static ID
+or unique origin/path suffix matches. All other supplied identity fields and
+active service-date candidates must pass before accepting this exception;
+origin/route/direction matches remain strict and malformed start times are
+rejected. Accepted matches retain `matched` / `unique_identity` and carry a
+separate `start_time_conflict` warning. Generic GTFS direction IDs are compared
+to static direction IDs; NYCT compass direction
 is compared to the parsed static suffix, without assuming a universal mapping
 between the two direction systems. A supplied NYCT direction that cannot be
 verified remains invalid. Stronger conflicting or ambiguous matches cannot
@@ -83,11 +89,28 @@ fall through. [MTA identifier definition](https://www.mta.info/document/134521)
 Each complete source is evaluated before route selection. The candidate graph
 must be unique in both directions, including cancellations and unidentified
 records, regardless of match priority or iteration order. Filtered inputs cannot
-establish full-source uniqueness. Stop ID and sequence must name the same
-scheduled occurrence; sequence-only updates resolve directly and ID-only updates
-require a unique occurrence. Repeated stops, duplicate updates, missing identity,
-and conflicting original feed order retain explicit outcomes. Predictions,
+establish full-source uniqueness. Tolerant candidates participate in the same
+within-source and cross-source uniqueness and configured-ownership checks.
+Stop ID and sequence normally name the same scheduled occurrence. For trip
+updates only, a conflicting pair with a known sequence may provisionally use
+the supplied ID if it occurs exactly once in the matched trip. All provisional
+associations undergo duplicate and original feed order (`InputIndex`) checks;
+accepted corrections carry `stop_id_sequence_conflict` warnings. Vehicle
+observations remain strict through `ResolveStop`. Sequence-only updates resolve
+directly and ID-only updates require a unique occurrence; a valid ID/sequence
+pair can identify a repeated occurrence. Unknown sequences, absent/repeated IDs
+in conflicting pairs, duplicate updates, missing identity, and conflicting
+original feed order retain blocking outcomes. Predictions,
 cancellations, `SKIPPED`, and `NO_DATA` remain untouched; associations are separate.
+
+Warnings are copied with immutable bundle lookups and emitted as a sorted,
+deduplicated `reconciliation_warnings` array on every positions record, including
+`[]` when empty. Warnings survive projection and authorized stale simulation,
+remain separate from reconciliation and no-position reasons, and grant no
+timing, geometry, freshness, cancellation, or simulation exception. The shared
+browser train details explain preferred evidence; omitted arrays remain
+compatible with older servers, malformed arrays are rejected, and unknown codes
+receive escaped generic text. These rules apply to all routes.
 
 Replacement rules require NYCT extension version `1.0`, an unfiltered full
 snapshot, the configured route owner, and at least one representable boundary.

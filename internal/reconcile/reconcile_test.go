@@ -2,6 +2,7 @@ package reconcile
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -53,10 +54,10 @@ func run(t *testing.T, s Source, trips ...schedule.Trip) *Bundle {
 }
 func TestIdentityMatching(t *testing.T) {
 	tests := []struct {
-		name, id     string
-		edit         func(*realtime.Train)
-		outcome      Outcome
-		rule, reason string
+		name, id              string
+		edit                  func(*realtime.Train)
+		outcome               Outcome
+		rule, reason, warning string
 	}{
 		{name: "exact", id: staticID, outcome: Matched, rule: "exact_id"},
 		{name: "suffix", id: "054050_A..N74R", outcome: Matched, rule: "origin_path"},
@@ -70,7 +71,18 @@ func TestIdentityMatching(t *testing.T) {
 		{name: "supplied NYCT conflict", id: "054050_A..N", edit: func(tr *realtime.Train) { tr.NYCTDirection = ptr(realtime.DirectionSouthbound) }, outcome: Invalid, reason: "nyct_direction_conflict"},
 		{name: "display inference ignored", id: staticID, edit: func(tr *realtime.Train) { tr.Direction = realtime.DirectionSouthbound }, outcome: Matched},
 		{name: "NYCT unknown", id: staticID, edit: func(tr *realtime.Train) { tr.NYCTDirection = ptr(realtime.DirectionUnknown) }, outcome: Invalid, reason: "nyct_direction_conflict"},
-		{name: "start conflict", id: staticID, edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00" }, outcome: Invalid, reason: "start_time_conflict"},
+		{name: "start conflict", id: staticID, edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00" }, outcome: Matched, reason: "unique_identity", warning: "start_time_conflict"},
+		{name: "suffix start conflict", id: "054050_A..N74R", edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00" }, outcome: Matched, rule: "origin_path", warning: "start_time_conflict"},
+		{name: "weak start conflict", id: "054050_A..N", edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00" }, outcome: Invalid, reason: "start_time_conflict"},
+		{name: "start and route conflict", id: staticID, edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00"; tr.RouteID = "C" }, outcome: Invalid, reason: "route_conflict"},
+		{name: "start and direction conflict", id: "054050_A..N74R", edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00"; tr.DirectionID = ptr(uint32(1)) }, outcome: Invalid, reason: "direction_id_conflict"},
+		{name: "start and NYCT conflict", id: staticID, edit: func(tr *realtime.Train) {
+			tr.StartTime = "09:00:00"
+			tr.NYCTDirection = ptr(realtime.DirectionSouthbound)
+		}, outcome: Invalid, reason: "nyct_direction_conflict"},
+		{name: "suffix start and NYCT conflict", id: "054050_A..N74R", edit: func(tr *realtime.Train) { tr.StartTime = "09:00:00"; tr.NYCTDirection = ptr(realtime.DirectionUnknown) }, outcome: Invalid, reason: "nyct_direction_conflict"},
+		{name: "suffix bad start", id: "054050_A..N74R", edit: func(tr *realtime.Train) { tr.StartTime = "09:60:00" }, outcome: Invalid, reason: "invalid_start_time"},
+		{name: "overflow start", id: staticID, edit: func(tr *realtime.Train) { tr.StartTime = "999999999999:00:00" }, outcome: Invalid, reason: "invalid_start_time"},
 		{name: "bad start", id: staticID, edit: func(tr *realtime.Train) { tr.StartTime = "nine" }, outcome: Invalid, reason: "invalid_start_time"},
 		{name: "bad date", id: staticID, edit: func(tr *realtime.Train) { tr.ServiceDate = "20260230" }, outcome: Invalid, reason: "invalid_service_date"},
 		{name: "inactive date", id: staticID, edit: func(tr *realtime.Train) { tr.ServiceDate = "20260914" }, outcome: Invalid, reason: "service_inactive_or_outside_coverage"},
@@ -88,6 +100,13 @@ func TestIdentityMatching(t *testing.T) {
 				trip.ID = "opaque"
 			}
 			got := run(t, source(tr), trip).Matches()[0]
+			var warnings []string
+			if tt.warning != "" {
+				warnings = []string{tt.warning}
+			}
+			if !slices.Equal(got.Warnings, warnings) {
+				t.Fatalf("warnings = %v, want %v", got.Warnings, warnings)
+			}
 			if got.Outcome != tt.outcome || (tt.rule != "" && got.Rule != tt.rule) || (tt.reason != "" && got.Reason != tt.reason) {
 				t.Fatalf("got %+v", got)
 			}
@@ -105,7 +124,7 @@ func TestPrecisionAndCurrentPrefix(t *testing.T) {
 	for _, tt := range []struct {
 		id, start string
 		want      Outcome
-	}{{"054001_A..N74R", "", Matched}, {"054000_A..N74R", "", Unmatched}, {trip.ID, "09:00:00", Invalid}} {
+	}{{"054001_A..N74R", "", Matched}, {"054000_A..N74R", "", Unmatched}, {trip.ID, "09:00:00", Matched}} {
 		got := run(t, source(realtime.Train{TripID: tt.id, ServiceDate: string(date), StartTime: tt.start}), trip).Matches()[0]
 		if got.Outcome != tt.want {
 			t.Fatalf("precision lost: %+v", got)
@@ -119,6 +138,7 @@ func TestBidirectionalUniquenessAndStrongerConflict(t *testing.T) {
 	first := realtime.Train{TripID: staticID, RouteID: "A", ServiceDate: string(date)}
 	second := first
 	second.TripID = "054050_A..N74R"
+	second.StartTime = "09:00:00"
 	for _, records := range [][]realtime.Train{{first, second}, {second, first}} {
 		b := run(t, source(records...))
 		for _, m := range b.Matches() {
@@ -158,7 +178,13 @@ func TestStopResolutionAndPredictionsUnchanged(t *testing.T) {
 		{"ID only unique", []realtime.StopPrediction{{StopID: "A02N"}}, []string{"resolved"}},
 		{"repeated ID", []realtime.StopPrediction{{StopID: "A01N"}}, []string{"repeated_stop"}},
 		{"both", []realtime.StopPrediction{{StopID: "A01N", Sequence: ptr(uint32(5))}}, []string{"resolved"}},
-		{"conflict", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}}, []string{"stop_id_sequence_conflict"}},
+		{"conflict", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}}, []string{"resolved"}},
+		{"conflicting repeated ID", []realtime.StopPrediction{{StopID: "A01N", Sequence: ptr(uint32(3))}}, []string{"stop_id_sequence_conflict"}},
+		{"conflicting absent ID", []realtime.StopPrediction{{StopID: "absent", Sequence: ptr(uint32(3))}}, []string{"stop_id_sequence_conflict"}},
+		{"unknown sequence with unique ID", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(99))}}, []string{"unknown_stop"}},
+		{"corrected duplicate", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}, {Sequence: ptr(uint32(3))}}, []string{"duplicate_stop_update", "duplicate_stop_update"}},
+		{"corrected order", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}, {Sequence: ptr(uint32(1))}}, []string{"conflicting_stop_order", "conflicting_stop_order"}},
+		{"corrected original order", []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1)), InputIndex: ptr(uint32(0))}, {Sequence: ptr(uint32(1)), InputIndex: ptr(uint32(1))}}, []string{"conflicting_stop_order", "conflicting_stop_order"}},
 		{"missing", []realtime.StopPrediction{{}}, []string{"missing_stop_identity"}},
 		{"unknown", []realtime.StopPrediction{{StopID: "missing"}}, []string{"unknown_stop"}},
 		{"duplicate", []realtime.StopPrediction{{Sequence: ptr(uint32(1))}, {Sequence: ptr(uint32(1))}}, []string{"duplicate_stop_update", "duplicate_stop_update"}},
@@ -179,8 +205,99 @@ func TestStopResolutionAndPredictionsUnchanged(t *testing.T) {
 				if m.Stops[i].Reason != reason {
 					t.Fatalf("%+v", m.Stops)
 				}
+				var warnings []string
+				if tt.name == "conflict" {
+					warnings = []string{"stop_id_sequence_conflict"}
+				}
+				if !slices.Equal(m.Stops[i].Warnings, warnings) {
+					t.Fatalf("warnings = %+v", m.Stops)
+				}
 			}
 		})
+	}
+}
+
+func TestToleratedIdentityRequiresUniqueCompleteOwnership(t *testing.T) {
+	for _, id := range []string{staticID, "054050_A..N74R"} {
+		for _, name := range []string{"duplicate record", "duplicate source", "incomplete", "owners", "service dates", "inactive", "missing schedule"} {
+			t.Run(id+"/"+name, func(t *testing.T) {
+				tr := realtime.Train{TripID: id, RouteID: "A", ServiceDate: string(date), StartTime: "09:00:00"}
+				tr.Stops = []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}}
+				sources := []Source{source(tr)}
+				trip := scheduled(staticID, 32430)
+				reason := "multiple_realtime_counterparts"
+				switch name {
+				case "duplicate record":
+					clean := tr.Clone()
+					clean.StartTime = ""
+					clean.TripID = staticID
+					sources[0].Snapshot.Trains = append(sources[0].Snapshot.Trains, clean)
+				case "duplicate source":
+					other := source(tr.Clone())
+					other.Name, other.Routes = "other", []string{"C"}
+					other.Snapshot.Trains[0].StartTime = ""
+					sources = append(sources, other)
+				case "incomplete":
+					sources[0].Snapshot.Complete = false
+					reason = "source_incomplete"
+				case "owners":
+					sources = append(sources, source())
+					reason = "ambiguous_route_owner"
+				case "service dates":
+					sources[0].Snapshot.Trains[0].ServiceDate = ""
+					trip.Stops[1].Arrival.Seconds, trip.Stops[1].Departure.Seconds = 49*3600, 49*3600
+					reason = "multiple_scheduled_instances"
+				case "inactive":
+					sources[0].Snapshot.Trains[0].ServiceDate = "20260914"
+					reason = "service_inactive_or_outside_coverage"
+				case "missing schedule":
+					reason = "schedule_missing"
+				}
+				v := version(t, now, trip)
+				if name == "missing schedule" {
+					v = nil
+				}
+				b := Reconcile(v, sources, now, time.Minute, 24*time.Hour)
+				for _, m := range b.Matches() {
+					if m.Outcome == Matched || m.Reason != reason || m.Instance != (Instance{}) || len(m.Warnings) != 0 {
+						t.Fatalf("%+v", m)
+					}
+					for _, stop := range m.Stops {
+						if len(stop.Warnings) != 0 {
+							t.Fatalf("unaccepted warning: %+v", stop)
+						}
+					}
+				}
+				if b.SimulationDecision(Instance{staticID, date}, now.Add(61*time.Second)).Allowed {
+					t.Fatal("unsafe identity authorized simulation")
+				}
+			})
+		}
+	}
+}
+
+func TestWarningCopiesAndStrictVehicleStop(t *testing.T) {
+	tr := realtime.Train{TripID: staticID, ServiceDate: string(date), StartTime: "09:00:00",
+		Stops:        []realtime.StopPrediction{{StopID: "A02N", Sequence: ptr(uint32(1))}},
+		VehicleMatch: realtime.VehicleMatched, VehicleStopID: "A02N", VehicleStopSequence: ptr(uint32(1))}
+	b := run(t, source(tr))
+	m := b.Matches()[0]
+	if m.Outcome != Matched || m.Stops[0].ScheduledIndex != 1 || m.Stops[0].Reason != "resolved" || m.VehicleStop.Outcome != Invalid || m.VehicleStop.Reason != "stop_id_sequence_conflict" || len(m.VehicleStop.Warnings) != 0 {
+		t.Fatalf("%+v", m)
+	}
+	if !slices.Equal(m.Warnings, []string{"start_time_conflict"}) || !slices.Equal(m.Stops[0].Warnings, []string{"stop_id_sequence_conflict"}) {
+		t.Fatalf("%+v", m)
+	}
+	m.Warnings[0], m.Stops[0].Warnings[0] = "mutated", "mutated"
+	again := b.Matches()[0]
+	if again.Warnings[0] != "start_time_conflict" || again.Stops[0].Warnings[0] != "stop_id_sequence_conflict" || !reflect.DeepEqual(again.Train, tr) {
+		t.Fatalf("mutable bundle: %+v", again)
+	}
+	// A valid ID/sequence pair still disambiguates a repeated stop for vehicles.
+	stops := scheduled(staticID, 32430).Stops
+	stops = append(stops, schedule.StopTime{StopID: "A01N", Sequence: 5})
+	if got := ResolveStop(realtime.StopPrediction{StopID: "A01N", Sequence: ptr(uint32(5))}, stops); got.Outcome != Matched || got.ScheduledIndex != 2 {
+		t.Fatalf("%+v", got)
 	}
 }
 func TestReplacementWindowsAndAuthority(t *testing.T) {

@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +17,7 @@ import (
 	"hol-up-prototype/internal/gen/gtfs"
 	"hol-up-prototype/internal/httpapi"
 	"hol-up-prototype/internal/ingest"
+	"hol-up-prototype/internal/projection"
 	"hol-up-prototype/internal/realtime"
 	"hol-up-prototype/internal/reconcile"
 	"hol-up-prototype/internal/schedule"
@@ -23,6 +26,68 @@ import (
 )
 
 type fixtureTransport map[string][]byte
+
+// Optional replay of the local captures described in TRAIN_POSITION_DIAGNOSIS.md.
+// Synthetic regressions run without these external files in the normal suite.
+func TestLocalPositionCapture(t *testing.T) {
+	dir := os.Getenv("HOLUP_TEST_POSITION_CAPTURE")
+	archivePath := os.Getenv("HOLUP_TEST_SCHEDULE_ARCHIVE")
+	if dir == "" || archivePath == "" {
+		t.Skip("set HOLUP_TEST_POSITION_CAPTURE and HOLUP_TEST_SCHEDULE_ARCHIVE for captured-feed replay")
+	}
+	read := func(path string) []byte {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	var report struct {
+		EvaluatedAt time.Time         `json:"evaluated_at"`
+		Schedule    schedule.Metadata `json:"schedule"`
+	}
+	if err := json.Unmarshal(read(filepath.Join(dir, "diagnosis.json")), &report); err != nil {
+		t.Fatal(err)
+	}
+	dataset, err := scheduleingest.Decode(read(archivePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := schedule.NewVersion(dataset, report.Schedule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := ingest.Decode(read(filepath.Join(dir, "ace.pb")), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot.ReceivedAt = report.EvaluatedAt
+	b := reconcile.Reconcile(v, []reconcile.Source{{Name: "ace", Routes: []string{"A", "C", "E", "H"}, Snapshot: snapshot}}, report.EvaluatedAt, time.Minute, 24*time.Hour)
+	counts := map[string]int{}
+	warnings := 0
+	for _, p := range projection.Positions(b, "A", report.EvaluatedAt) {
+		reason := p.NullReason
+		if p.Latitude != nil {
+			reason = "positioned"
+		}
+		counts[reason]++
+		if slices.Contains(p.ReconciliationWarnings, "vehicle_stop_sequence_conflict_ignored") {
+			warnings++
+		}
+		if reason == "not_started" && (!p.PredictedDepartureAt.After(report.EvaluatedAt) || p.MovementState != realtime.MovementStateUnknown) {
+			t.Fatalf("invalid upcoming departure: %+v", p)
+		}
+	}
+	wantUpcoming := map[string]int{"2026-09-15T21:10:21Z": 16, "2026-09-15T21:15:16Z": 19}[report.EvaluatedAt.Format(time.RFC3339)]
+	if wantUpcoming == 0 {
+		t.Fatal("not one of the two diagnosed captures")
+	}
+	t.Logf("evaluated_at=%s schedule=%s counts=%v vehicle_warnings=%d", report.EvaluatedAt.Format(time.RFC3339), v.Metadata().Version, counts, warnings)
+	if counts["positioned"] != 31 || counts["not_started"] != wantUpcoming || warnings != 32 || counts["insufficient_timing"] != 1 {
+		t.Fatalf("capture differs from expected policy: %v warnings=%d", counts, warnings)
+	}
+}
 
 func (f fixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	return &http.Response{StatusCode: 200, Body: io.NopCloser(bytes.NewReader(f[r.URL.Path]))}, nil
@@ -78,6 +143,16 @@ func TestOfflineALineIngestionThroughReconciliation(t *testing.T) {
 }
 
 func TestOfflineALineGeometryAndPositionLifecycle(t *testing.T) {
+	for _, conflicts := range []bool{false, true} {
+		name := "clean"
+		if conflicts {
+			name = "tolerated conflicts"
+		}
+		t.Run(name, func(t *testing.T) { checkOfflineALineLifecycle(t, conflicts) })
+	}
+}
+
+func checkOfflineALineLifecycle(t *testing.T, conflicts bool) {
 	archive, err := os.ReadFile("../test/fixtures/reconcile/a-line.zip")
 	if err != nil {
 		t.Fatal(err)
@@ -102,6 +177,15 @@ func TestOfflineALineGeometryAndPositionLifecycle(t *testing.T) {
 	update.StopTimeUpdate = append(update.StopTimeUpdate, &gtfs.TripUpdate_StopTimeUpdate{
 		StopSequence: proto.Uint32(2), Arrival: &gtfs.TripUpdate_StopTimeEvent{Time: proto.Int64(initial.Add(630 * time.Second).Unix())},
 	})
+	var warnings []string
+	if conflicts {
+		update.Trip.StartTime = proto.String("00:10:00")
+		update.StopTimeUpdate[0].StopId = proto.String("A02S")
+		update.StopTimeUpdate[0].StopSequence = proto.Uint32(2)
+		update.StopTimeUpdate[1].StopId = proto.String("A03S")
+		update.StopTimeUpdate[1].StopSequence = proto.Uint32(1)
+		warnings = []string{"start_time_conflict", "stop_id_sequence_conflict"}
+	}
 	wire, err = proto.Marshal(&feed)
 	if err != nil {
 		t.Fatal(err)
@@ -137,11 +221,12 @@ func TestOfflineALineGeometryAndPositionLifecycle(t *testing.T) {
 		t.Fatalf("geometry = %d/%s", g.Code, g.Body.String())
 	}
 	type projected struct {
-		TripInstanceID      string `json:"trip_instance_id"`
-		ScheduleVersion     string `json:"schedule_version"`
-		Basis               string `json:"position_basis"`
-		Freshness           string `json:"freshness"`
-		Movement            string `json:"movement_state"`
+		Warnings            []string `json:"reconciliation_warnings"`
+		TripInstanceID      string   `json:"trip_instance_id"`
+		ScheduleVersion     string   `json:"schedule_version"`
+		Basis               string   `json:"position_basis"`
+		Freshness           string   `json:"freshness"`
+		Movement            string   `json:"movement_state"`
 		Latitude, Longitude *float64
 		SourceTimestamp     string  `json:"source_timestamp"`
 		Reason              *string `json:"no_position_reason"`
@@ -157,6 +242,9 @@ func TestOfflineALineGeometryAndPositionLifecycle(t *testing.T) {
 		}
 		if r.Code != http.StatusOK || len(body.Trains) != 1 {
 			t.Fatalf("positions = %d/%s", r.Code, r.Body.String())
+		}
+		if body.Trains[0].Warnings == nil || !slices.Equal(body.Trains[0].Warnings, warnings) {
+			t.Fatalf("warnings = %v, want %v", body.Trains[0].Warnings, warnings)
 		}
 		return body.Trains
 	}
@@ -178,6 +266,15 @@ func TestOfflineALineGeometryAndPositionLifecycle(t *testing.T) {
 	}
 	if retained := positions()[0]; retained.TripInstanceID != fresh.TripInstanceID || retained.ScheduleVersion != fresh.ScheduleVersion {
 		t.Fatalf("failed refresh replaced retained position: %+v", retained)
+	}
+	// A clean replacement removes tolerated warnings without changing run identity.
+	if conflicts {
+		update.Trip.StartTime = nil
+		for i, stop := range update.StopTimeUpdate {
+			stop.StopId = nil
+			stop.StopSequence = proto.Uint32(uint32(i + 1))
+		}
+		warnings = nil
 	}
 	feed.Header.Timestamp = proto.Uint64(uint64(at.Unix()))
 	wire, err = proto.Marshal(&feed)

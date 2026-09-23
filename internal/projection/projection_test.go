@@ -2,6 +2,7 @@ package projection
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -61,12 +62,75 @@ func only(t *testing.T, b *reconcile.Bundle, now time.Time) Position {
 	return got[0]
 }
 
+// Every case uses the same captured schedule and evaluation time. Counts are a
+// deterministic coverage comparison, independent of changing public feeds.
+func TestConflictCoverageFixture(t *testing.T) {
+	const id = "prefix_072000_A..N74R"
+	v, now := fixture(t, func(d *schedule.Data) { d.Trips[0].ID = id })
+	startConflict := func(r *realtime.Train) { r.StartTime = "12:01:00" }
+	stopConflict := func(r *realtime.Train) {
+		r.Stops[0].Sequence, r.Stops[1].Sequence = ptr(uint32(2)), ptr(uint32(1))
+		// Match ingestion's normalization while retaining original feed order.
+		slices.Reverse(r.Stops)
+	}
+	tests := []struct {
+		name, reason string
+		warnings     []string
+		edit         func(*realtime.Train)
+	}{
+		{"clean exact", "", nil, func(*realtime.Train) {}},
+		{"clean suffix", "", nil, func(r *realtime.Train) { r.TripID = "072000_A..N74R" }},
+		{"exact start", "", []string{"start_time_conflict"}, startConflict},
+		{"suffix start", "", []string{"start_time_conflict"}, func(r *realtime.Train) { r.TripID = "072000_A..N74R"; startConflict(r) }},
+		{"stop conflict", "", []string{"stop_id_sequence_conflict"}, stopConflict},
+		{"combined", "", []string{"start_time_conflict", "stop_id_sequence_conflict"}, func(r *realtime.Train) { startConflict(r); stopConflict(r) }},
+		{"combined without timing", "insufficient_timing", []string{"start_time_conflict", "stop_id_sequence_conflict"}, func(r *realtime.Train) {
+			startConflict(r)
+			stopConflict(r)
+			for i := range r.Stops {
+				r.Stops[i].Arrival, r.Stops[i].Departure = nil, nil
+			}
+		}},
+		{"weak start", "start_time_conflict", nil, func(r *realtime.Train) { r.TripID = "072000_A..N"; startConflict(r) }},
+		{"NYCT direction and start", "nyct_direction_conflict", nil, func(r *realtime.Train) { startConflict(r); r.NYCTDirection = ptr(realtime.DirectionSouthbound) }},
+		{"malformed start", "invalid_start_time", nil, func(r *realtime.Train) { r.StartTime = "12:99:00" }},
+		{"unknown sequence", "unknown_stop", nil, func(r *realtime.Train) { r.Stops[0].Sequence = ptr(uint32(99)) }},
+		{"absent stop ID", "stop_id_sequence_conflict", nil, func(r *realtime.Train) { r.Stops[0].StopID = "absent" }},
+		{"duplicate association", "duplicate_stop_update", nil, func(r *realtime.Train) { r.Stops[0].StopID = "end" }},
+		{"original order", "conflicting_stop_order", nil, func(r *realtime.Train) { r.Stops[0].InputIndex, r.Stops[1].InputIndex = ptr(uint32(1)), ptr(uint32(0)) }},
+	}
+	positioned := 0
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := record(now)
+			r.TripID = id
+			r.Stops[0].StopID, r.Stops[1].StopID = "start", "end"
+			r.Stops[0].InputIndex, r.Stops[1].InputIndex = ptr(uint32(0)), ptr(uint32(1))
+			tt.edit(&r)
+			p := only(t, bundle(v, now, r), now)
+			if p.NullReason != tt.reason || (p.Latitude != nil) != (tt.reason == "") || !slices.Equal(p.ReconciliationWarnings, tt.warnings) {
+				t.Fatalf("position = %+v, want reason %q", p, tt.reason)
+			}
+			if p.Latitude != nil {
+				positioned++
+			}
+		})
+	}
+	t.Logf("evaluated_at=%s source_timestamp=%s schedule_version=%s positioned=%d unpositioned=%d", now.Format(time.RFC3339), now.Format(time.RFC3339), v.Metadata().Version, positioned, len(tests)-positioned)
+	if positioned != 6 {
+		t.Fatalf("positioned=%d, want 6 (baseline 2)", positioned)
+	}
+}
+
 func TestBentPolylinePollingAndStableSimulationTransition(t *testing.T) {
 	v, now := fixture(t, nil)
 	b := bundle(v, now, record(now))
 	first := only(t, b, now)
 	if first.Latitude == nil || math.Abs(*first.Latitude) > 1e-8 || math.Abs(*first.Longitude-.01) > 1e-8 || first.InterpolationMethod != "realtime_events" {
 		t.Fatalf("bent midpoint=%+v", first)
+	}
+	if first.ShapeDistanceMeters <= 0 || first.NextStationID != "end" || first.NextStopSequence == nil || *first.NextStopSequence != 2 || !first.NextArrivalAt.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("journey details=%+v", first)
 	}
 	second := only(t, b, now.Add(30*time.Second))
 	if second.Latitude == nil || *second.Latitude <= *first.Latitude || second.TripInstanceID != first.TripInstanceID {
@@ -90,6 +154,19 @@ func TestBentPolylinePollingAndStableSimulationTransition(t *testing.T) {
 	expired := only(t, b, now.Add(25*time.Hour))
 	if expired.Latitude != nil || expired.NullReason != "schedule_ineligible" {
 		t.Fatalf("expired schedule=%+v", expired)
+	}
+}
+
+func TestNextStopSkipsSkippedOccurrencesAndAllowsMissingArrival(t *testing.T) {
+	p := Position{ShapeDistanceMeters: 0}
+	pattern := schedule.Pattern{Stops: []schedule.StopOccurrence{
+		{StationID: "current", Sequence: 1, DistanceMeters: 0, HasDistance: true},
+		{StationID: "skipped", Sequence: 2, DistanceMeters: 10, HasDistance: true},
+		{StationID: "next", Sequence: 3, DistanceMeters: 20, HasDistance: true},
+	}}
+	setNextStop(&p, pattern, []stopTimes{{}, {skipped: true}, {}})
+	if p.NextStationID != "next" || p.NextStopSequence == nil || *p.NextStopSequence != 3 || !p.NextArrivalAt.IsZero() {
+		t.Fatalf("next stop=%+v", p)
 	}
 }
 
@@ -151,23 +228,28 @@ func TestRealtimeTimingAndNullOutcomes(t *testing.T) {
 		}, "", "insufficient_timing"},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			r := record(now)
-			test.change(&r)
-			p := only(t, bundle(v, now, r), now)
-			if p.InterpolationMethod != test.method || p.NullReason != test.reason || (p.Latitude == nil) != (test.reason != "") {
-				t.Fatalf("position=%+v", p)
-			}
-			if test.name == "reported dwell" && p.MovementState != realtime.MovementStateReportedStopped {
-				t.Fatalf("movement=%s", p.MovementState)
-			}
-			if test.name == "predicted dwell" && p.MovementState == realtime.MovementStateReportedStopped {
-				t.Fatal("prediction claimed vehicle observation")
-			}
-			if test.name == "missing observation" && p.ObservationBasis != "feed_header" {
-				t.Fatal("missing header label")
-			}
-		})
+		for _, variant := range []string{"clean", "start warning"} {
+			t.Run(test.name+"/"+variant, func(t *testing.T) {
+				r := record(now)
+				if variant == "start warning" {
+					r.StartTime = "12:01:00"
+				}
+				test.change(&r)
+				p := only(t, bundle(v, now, r), now)
+				if p.InterpolationMethod != test.method || p.NullReason != test.reason || (p.Latitude == nil) != (test.reason != "") {
+					t.Fatalf("position=%+v", p)
+				}
+				if test.name == "reported dwell" && p.MovementState != realtime.MovementStateReportedStopped {
+					t.Fatalf("movement=%s", p.MovementState)
+				}
+				if test.name == "predicted dwell" && p.MovementState == realtime.MovementStateReportedStopped {
+					t.Fatal("prediction claimed vehicle observation")
+				}
+				if test.name == "missing observation" && p.ObservationBasis != "feed_header" {
+					t.Fatal("missing header label")
+				}
+			})
+		}
 	}
 }
 

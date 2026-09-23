@@ -21,3 +21,5 @@ coverage.out
 .idea/
 .DS_Store
 Thumbs.db
+/web/test-results/
+/web/playwright-report/

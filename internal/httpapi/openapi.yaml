@@ -594,7 +594,12 @@ components:
       - schedule_version
       - latitude
       - longitude
+      - shape_distance_meters
+      - next_station_id
+      - next_stop_sequence
+      - next_arrival_at
       - projected_at
+      - predicted_departure_at
       - position_basis
       - movement_state
       - source_timestamp
@@ -615,6 +620,7 @@ components:
       - interpolation_method
       - reconciliation_outcome
       - reconciliation_reason
+      - reconciliation_warnings
       - fallback_reason
       - no_position_reason
       properties:
@@ -680,6 +686,22 @@ components:
           - 'null'
           minimum: -180
           maximum: 180
+        shape_distance_meters:
+          type:
+          - number
+          - 'null'
+          minimum: 0
+          description: Cumulative geometric distance along shape_id; null when the train has no position.
+        next_station_id: *id004
+        next_stop_sequence:
+          type:
+          - integer
+          - 'null'
+          minimum: 0
+          description: Identifies the next non-skipped occurrence in the selected service pattern.
+        next_arrival_at:
+          $ref: '#/components/schemas/Timestamp'
+          description: Best available realtime-derived or scheduled arrival for next_station_id; null when timing is unavailable.
         projected_at:
           $ref: '#/components/schemas/Timestamp'
         position_basis:
@@ -689,6 +711,10 @@ components:
           - schedule_fallback
           description: Inference basis, never GPS-observed. Stale matched simulations retain run identity
             and realtime provenance.
+        predicted_departure_at:
+          $ref: '#/components/schemas/Timestamp'
+          description: Future first-stop departure when no_position_reason is not_started; otherwise null.
+            Derived from fresh validated trip predictions, with no current-location claim.
         movement_state:
           type: string
           enum:
@@ -741,11 +767,26 @@ components:
           - ambiguous
           - unavailable
         reconciliation_reason: *id001
+        reconciliation_warnings:
+          type: array
+          items:
+            type: string
+          uniqueItems: true
+          description: Sorted, deduplicated evidence warnings; empty when none apply.
+            start_time_conflict prefers an exact trip ID or unique origin/path suffix after all other
+            identity and uniqueness checks pass. stop_id_sequence_conflict prefers a unique stop ID
+            for trip updates only after duplicate and original feed order checks pass.
+            vehicle_stop_sequence_conflict_ignored excludes a conflicting vehicle observation when its
+            stop ID uniquely identifies a scheduled occurrence, allowing independent fresh trip predictions.
+            Raw vehicle associations and stale simulation validation remain strict.
+            Warnings persist during authorized stale simulation and can coexist with no_position_reason.
+            They do not independently authorize coordinates or simulation. Clients should describe unknown codes generically.
         fallback_reason: *id004
         no_position_reason:
           type: *id003
           description: Non-null whenever latitude/longitude are null. Cancellation/identity/authority failures
-            precede geometry and timing failures.
+            precede geometry and timing failures. not_started identifies an upcoming first-stop departure,
+            evaluated before geometry, with unknown movement and predicted_departure_at populated.
       description: One retained realtime record or an authorized scheduled run. Both coordinates are present
         or both null. Fresh geometry/timing failure stays null. No extrapolation beyond supported timing intervals.
         Clients restart interpolation on missing/null outcomes, ambiguity, changed trip/path/direction/geometry,
@@ -892,7 +933,12 @@ components:
             "schedule_version": null,
             "latitude": null,
             "longitude": null,
+            "shape_distance_meters": null,
+            "next_station_id": null,
+            "next_stop_sequence": null,
+            "next_arrival_at": null,
             "projected_at": "2026-09-13T04:10:00Z",
+            "predicted_departure_at": null,
             "position_basis": "realtime_prediction",
             "movement_state": "unknown",
             "source_timestamp": "2026-09-13T04:10:00Z",
@@ -913,6 +959,7 @@ components:
             "interpolation_method": "",
             "reconciliation_outcome": "unavailable",
             "reconciliation_reason": "schedule_missing",
+            "reconciliation_warnings": [],
             "fallback_reason": null,
             "no_position_reason": "schedule_missing",
             "realtime_service_date": "20260913"
@@ -963,7 +1010,12 @@ components:
             "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "latitude": 40.8,
             "longitude": -73.911605063314,
+            "shape_distance_meters": 976.8460081079866,
+            "next_station_id": "second",
+            "next_stop_sequence": 2,
+            "next_arrival_at": "2026-09-13T04:19:30Z",
             "projected_at": "2026-09-13T04:10:00Z",
+            "predicted_departure_at": null,
             "position_basis": "realtime_prediction",
             "movement_state": "inferred_moving",
             "source_timestamp": "2026-09-13T04:09:00Z",
@@ -984,6 +1036,7 @@ components:
             "interpolation_method": "realtime_events",
             "reconciliation_outcome": "matched",
             "reconciliation_reason": "unique_identity",
+            "reconciliation_warnings": ["start_time_conflict", "stop_id_sequence_conflict"],
             "fallback_reason": null,
             "no_position_reason": null
           }
@@ -1033,7 +1086,12 @@ components:
             "schedule_version": "supplemented:2:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "latitude": 40.8,
             "longitude": -73.91199189875779,
+            "shape_distance_meters": 1009.4075417115861,
+            "next_station_id": "second",
+            "next_stop_sequence": 2,
+            "next_arrival_at": "2026-09-13T04:19:30Z",
             "projected_at": "2026-09-13T04:10:01Z",
+            "predicted_departure_at": null,
             "position_basis": "schedule_fallback",
             "movement_state": "unknown",
             "source_timestamp": "2026-09-13T04:09:00Z",
@@ -1054,6 +1112,7 @@ components:
             "interpolation_method": "schedule",
             "reconciliation_outcome": "matched",
             "reconciliation_reason": "unique_identity",
+            "reconciliation_warnings": ["start_time_conflict", "stop_id_sequence_conflict"],
             "fallback_reason": "stale_realtime_counterpart",
             "no_position_reason": null
           }

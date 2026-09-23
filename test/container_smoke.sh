@@ -43,6 +43,12 @@ while [ "$attempt" -lt 20 ]; do
         asset=$(printf '%s\n' "$html" | sed -n 's|.*src="\(/assets/index-[A-Za-z0-9_-]*\.js\)".*|\1|p')
         test -n "$asset"
         test -n "$(curl -fsS "http://127.0.0.1:$port$asset")"
+        worker=$(curl -fsS "http://127.0.0.1:$port$asset" | grep -o '/assets/maplibre-gl-worker-[A-Za-z0-9_-]*\.js' | head -n 1)
+        test -n "$worker"
+        test -n "$(curl -fsS "http://127.0.0.1:$port$worker")"
+        css=$(printf '%s\n' "$html" | sed -n 's|.*href="\(/assets/index-[A-Za-z0-9_-]*\.css\)".*|\1|p')
+        test -n "$css"
+        curl -fsS "http://127.0.0.1:$port$css" | grep -q 'maplibregl-canvas'
         for path in readyz api/v1/routes 'api/v1/trains?route_id=A' 'api/v1/trains?route_id=A&view=positions' api/v1/routes/A/geometry; do
             test "$(curl -sS -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/$path")" = 503
         done

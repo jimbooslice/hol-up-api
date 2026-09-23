@@ -173,7 +173,12 @@ type positionResponse struct {
 	ScheduleVersion            *string                `json:"schedule_version"`
 	Latitude                   *float64               `json:"latitude"`
 	Longitude                  *float64               `json:"longitude"`
+	ShapeDistanceMeters        *float64               `json:"shape_distance_meters"`
+	NextStationID              *string                `json:"next_station_id"`
+	NextStopSequence           *uint32                `json:"next_stop_sequence"`
+	NextArrivalAt              *string                `json:"next_arrival_at"`
 	ProjectedAt                *string                `json:"projected_at"`
+	PredictedDepartureAt       *string                `json:"predicted_departure_at"`
 	PositionBasis              realtime.PositionBasis `json:"position_basis"`
 	MovementState              realtime.MovementState `json:"movement_state"`
 	SourceTimestamp            *string                `json:"source_timestamp"`
@@ -194,6 +199,7 @@ type positionResponse struct {
 	InterpolationMethod        string                 `json:"interpolation_method"`
 	ReconciliationOutcome      reconcile.Outcome      `json:"reconciliation_outcome"`
 	ReconciliationReason       string                 `json:"reconciliation_reason"`
+	ReconciliationWarnings     []string               `json:"reconciliation_warnings"`
 	FallbackReason             *string                `json:"fallback_reason"`
 	NoPositionReason           *string                `json:"no_position_reason"`
 }
@@ -203,14 +209,24 @@ func positionDTO(p projection.Position, now time.Time) positionResponse {
 		TripID: nullableString(p.StaticTripID), ServiceDate: nullableString(p.ServiceDate), TripInstanceID: nullableString(p.TripInstanceID),
 		RealtimeTripID: p.RealtimeTripID, RealtimeServiceDate: p.RealtimeServiceDate, SourceRecordID: nullableString(p.SourceRecordID), SourceName: p.SourceName, EntityID: p.EntityID, SourceIndex: p.SourceIndex,
 		VehicleEntityID: p.VehicleEntityID, VehicleMatch: p.VehicleMatch, ShapeID: nullableString(p.ShapeID), PatternID: nullableString(p.PatternID),
-		ScheduleVersion: nullableString(p.ScheduleVersion), Latitude: p.Latitude, Longitude: p.Longitude, ProjectedAt: timestamp(p.ProjectionTime),
-		PositionBasis: p.PositionBasis, MovementState: p.MovementState, SourceTimestamp: timestamp(p.SourceTimestamp), SourceAgeSeconds: ageSeconds(p.SourceTimestamp, now),
+		ScheduleVersion: nullableString(p.ScheduleVersion), Latitude: p.Latitude, Longitude: p.Longitude, ShapeDistanceMeters: positionDistance(p),
+		NextStationID: nullableString(p.NextStationID), NextStopSequence: p.NextStopSequence, NextArrivalAt: timestamp(p.NextArrivalAt), ProjectedAt: timestamp(p.ProjectionTime),
+		PredictedDepartureAt: timestamp(p.PredictedDepartureAt),
+		PositionBasis:        p.PositionBasis, MovementState: p.MovementState, SourceTimestamp: timestamp(p.SourceTimestamp), SourceAgeSeconds: ageSeconds(p.SourceTimestamp, now),
 		ReceivedAt: timestamp(p.ReceivedAt), TripUpdateTimestamp: timestamp(p.TripUpdateTimestamp), TripUpdateTimestampPresent: p.TripUpdateTimestampPresent,
 		TripUpdateFreshness: p.TripUpdateFreshness, VehicleTimestamp: timestamp(p.VehicleTimestamp), VehicleTimestampPresent: p.VehicleTimestampPresent,
 		VehicleFreshness: p.VehicleFreshness, Freshness: p.Freshness, ObservationTime: timestamp(p.ObservationTime), ObservationAgeSeconds: ageSeconds(p.ObservationTime, now),
 		ObservationBasis: p.ObservationBasis, ScheduleValidatedAt: timestamp(p.ScheduleValidatedAt), ScheduleAgeSeconds: ageSeconds(p.ScheduleValidatedAt, now),
 		InterpolationMethod: p.InterpolationMethod, ReconciliationOutcome: p.ReconciliationOutcome, ReconciliationReason: p.ReconciliationReason,
-		FallbackReason: nullableString(p.FallbackReason), NoPositionReason: nullableString(p.NullReason)}
+		ReconciliationWarnings: append([]string{}, p.ReconciliationWarnings...),
+		FallbackReason:         nullableString(p.FallbackReason), NoPositionReason: nullableString(p.NullReason)}
+}
+
+func positionDistance(p projection.Position) *float64 {
+	if p.Latitude == nil || p.Longitude == nil {
+		return nil
+	}
+	return &p.ShapeDistanceMeters
 }
 
 func (h *Handler) positions(w http.ResponseWriter, routeID string, now time.Time) {

@@ -31,7 +31,7 @@ a { color: var(--blue); text-underline-offset: 0.2em; }
 }
 .skip-link:focus { transform: translateY(0); }
 
-.site-header, main, .site-footer { width: min(100% - 4rem, 1200px); margin-inline: auto; }
+.site-header, main, .site-footer { width: calc(100% - clamp(2rem, 4vw, 5rem)); margin-inline: auto; }
 .site-header { display: flex; align-items: center; justify-content: space-between; gap: 1.5rem; padding-block: 1.5rem; border-bottom: 1px solid var(--border); }
 .brand { display: flex; align-items: center; gap: 0.85rem; }
 .line-badge { display: grid; place-items: center; flex-shrink: 0; width: 3rem; height: 3rem; border-radius: 50%; background: var(--blue); color: white; font-size: 1.8rem; font-weight: 750; }
@@ -44,11 +44,12 @@ main { padding-block: 2.5rem; }
 .intro h1 { margin-block: 0.5rem 0.75rem; }
 .intro > p:last-child { color: var(--muted); }
 .status { margin-block: 1.75rem; padding: 1rem 1.25rem; border: 1px solid #ccdaf3; border-radius: 0.75rem; background: #edf3ff; color: #23416d; font-size: 0.875rem; }
-.overview { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 1.25rem; }
+.status-error { border-color: #e6b8b8; background: #fff1f1; color: #702626; }
+.status button { min-height: 44px; margin-left: 0.5rem; padding: 0.5rem 0.9rem; border: 1px solid currentColor; border-radius: 0.5rem; background: white; color: inherit; font: inherit; font-weight: 700; cursor: pointer; }
+.overview { display: grid; align-items: start; grid-template-columns: minmax(0, 1fr) 360px; gap: 1.25rem; }
 .panel { padding: 1.5rem; border: 1px solid var(--border); border-radius: 0.85rem; background: white; }
 .map-panel { display: flex; flex-direction: column; }
 .map-placeholder { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; min-height: 320px; margin-top: 1.25rem; padding: 2rem; border: 1px dashed #c9d4e4; border-radius: 0.5rem; background: #f6f8fc; text-align: center; }
-.map-placeholder .line-badge { margin-bottom: 1.25rem; }
 .map-placeholder p { max-width: 36ch; margin-top: 0.75rem; color: var(--muted); font-size: 0.875rem; }
 .lists { display: grid; gap: 1.25rem; }
 .lists h2 { margin-top: 0.4rem; }
@@ -62,12 +63,81 @@ main { padding-block: 2.5rem; }
 .site-footer p { align-content: center; }
 
 @media (max-width: 700px) {
-  .site-header, main, .site-footer { width: calc(100% - 2rem); }
+  .site-header, main, .site-footer { width: calc(100% - min(2rem, 32px)); }
   .site-header { flex-wrap: wrap; padding-block: 1.25rem; }
   .line-selector { width: 100%; justify-content: space-between; }
   main { padding-block: 2rem; }
   .overview { grid-template-columns: minmax(0, 1fr); }
-  .panel { padding: 1.25rem; }
+  .panel { padding: min(1.25rem, 20px); }
   .map-placeholder { min-height: 260px; padding: 1.5rem; }
   .site-footer { flex-direction: column; gap: 0.25rem; }
 }
+
+.map-stage { position: relative; }
+.route-map { height: clamp(480px, 70dvh, 800px); width: 100%; border: 1px solid var(--border); border-radius: 0.5rem; }
+.train-marker-overlay { position: absolute; top: 0; left: 0; width: 100%; z-index: 2; pointer-events: none; overflow: hidden; }
+.train-marker-position { position: absolute; width: 44px; height: 44px; transform: translate(-50%, -50%); pointer-events: auto; }
+.train-marker { position: relative; display: grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; cursor: pointer; transform: translateY(0); }
+.train-marker-badge { position: relative; z-index: 1; display: grid; place-items: center; width: 28px; height: 28px; border: 2px solid var(--route-color); border-radius: 50%; outline: 2px solid #566477; outline-offset: 1px; background: var(--route-color); color: var(--route-text); font: 800 0.9rem/1 system-ui, sans-serif; transition: filter 160ms ease, opacity 160ms ease, transform 160ms ease; }
+.train-marker[data-simulation] .train-marker-badge { background: white; color: var(--route-color); }
+.train-marker-overlay:has(.train-marker[data-previewed], .train-marker[aria-pressed="true"]) .train-marker:not([data-previewed]):not([aria-pressed="true"]) .train-marker-badge { filter: saturate(25%); opacity: 0.55; transform: scale(0.86); }
+.train-marker:focus-visible { outline: none; }
+.train-marker:hover .train-marker-badge, .train-marker:focus-visible .train-marker-badge { outline-style: dashed; }
+.train-marker[aria-pressed="true"] .train-marker-badge { outline: 3px solid #b54708; outline-offset: 2px; }
+.train-marker[aria-pressed="true"]:focus-visible .train-marker-badge::after { content: ''; position: absolute; inset: -9px; border: 2px dashed #18263a; border-radius: 50%; }
+.map-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-block: 1rem; }
+.map-controls button { min-width: 44px; min-height: 44px; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.5rem; background: white; color: var(--blue); font: inherit; font-weight: 650; cursor: pointer; }
+.map-controls button:disabled { color: var(--muted); cursor: default; }
+.map-status, .map-attribution { margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); }
+.map-attribution a { display: inline-block; padding-block: 0.5rem; }
+.station-list { margin: 1rem 0 0; padding-left: 1.25rem; }
+.station-list li { padding-block: 0.6rem; border-top: 1px solid var(--border); overflow-wrap: anywhere; }
+.station-list small { display: block; color: var(--muted); }
+.maplibregl-canvas:focus-visible { outline-offset: -4px; }
+@media (max-width: 1023px) {
+  .overview { grid-template-columns: minmax(0, 1fr); }
+  .route-map { height: clamp(320px, 55dvh, 560px); }
+}
+@media (prefers-reduced-motion: reduce) { .train-marker-badge { transition: none; } }
+
+.train-list { list-style: none; padding: 0; }
+.train-list li { border-top: 1px solid var(--border); padding-block: 1rem; }
+.train-list button, #trains-heading + button { min-height: 44px; padding: 0.5rem; font: inherit; color: var(--blue); background: white; border: 1px solid var(--border); border-radius: 0.4rem; cursor: pointer; }
+.train-list button[aria-pressed="true"] { border: 2px solid var(--blue); background: #edf3ff; }
+.train-info, .train-list button, .lists p { overflow-wrap: anywhere; }
+.train-info, .map-legend { font-size: 0.8rem; margin-top: 0.75rem; }
+.train-key { display: inline-block; width: 0.9rem; height: 0.9rem; border: 3px solid var(--blue); border-radius: 50%; vertical-align: -0.15rem; }
+.realtime-key { background: var(--blue); }
+.simulation-key { margin-left: 0.4rem; background: transparent; }
+.train-popup { z-index: 4; }
+.maplibregl-popup-content { padding: 0; border-radius: 0.7rem; box-shadow: 0 8px 24px rgb(24 38 58 / 20%); }
+.train-popup .maplibregl-popup-tip {
+  display: block;
+  border-width: 10px;
+  filter: drop-shadow(0 1px 1px rgb(24 38 58 / 20%));
+}
+.marker-card-measure { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; }
+.marker-card { max-width: 100%; padding: 0.85rem; border: 2px solid #8d98a8; border-radius: 0.7rem; background: white; color: #18263a; font: 0.8rem/1.4 system-ui, sans-serif; overflow-wrap: anywhere; }
+.marker-card[data-state="selected"] { border: 3px solid var(--route-color); box-shadow: 0 0 0 3px white; }
+.marker-card-state { margin-top: 0.45rem; font-size: 0.75rem; font-weight: 650; color: var(--muted); }
+.marker-card[data-state="selected"] .marker-card-state { color: #18263a; }
+.marker-details-panel { margin-top: 0.75rem; }
+.marker-details-panel .marker-card { width: 100% !important; box-shadow: none; }
+.map-hint { margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); }
+.marker-card-header { display: flex; align-items: center; gap: 0.55rem; }
+.marker-card-header strong { flex: 1; font-size: 0.9rem; }
+.marker-card-header button { min-width: 44px; min-height: 44px; padding: 0.3rem 0.55rem; border: 1px solid var(--border); border-radius: 0.35rem; background: white; color: var(--blue); font: inherit; font-weight: 650; cursor: pointer; }
+.marker-card-badge { display: grid; place-items: center; flex: 0 0 1.8rem; width: 1.8rem; height: 1.8rem; border-radius: 50%; font-weight: 800; }
+.marker-card dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.2rem 0.65rem; margin: 0.65rem 0 0; }
+.marker-card dt { font-weight: 650; }
+.marker-card dd { margin: 0; color: var(--muted); }
+.position-warning { margin-top: 0.75rem; padding: 0.75rem; border-left: 4px solid #b54708; background: #fff7ed; }
+.position-warning h3 { font-size: 0.9rem; }
+.position-warning ul { margin-bottom: 0; padding-left: 1.2rem; }
+.position-warning li { margin-top: 0.5rem; }
+.position-warning code, .train-info code { overflow-wrap: anywhere; }
+.train-info dl { margin-block: 0.5rem; }
+.train-info dt { font-weight: 650; }
+.train-info dd { margin: 0 0 0.4rem; color: var(--muted); }
+
+#trains-heading:focus { outline: 3px solid var(--blue); outline-offset: 5px; }
