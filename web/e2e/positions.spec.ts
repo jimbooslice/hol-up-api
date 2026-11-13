@@ -46,7 +46,7 @@ test('complete outcomes, escaped text, selection and focus survive replacement; 
   await expect(page.locator('.train-list img, .train-list script')).toHaveCount(0);
   const button = page.getByRole('button', { name: 'Run run-one', exact: true });
   await button.click();
-  await expect(page.getByRole('region', { name: 'Train details' })).toContainText('run-one');
+  await expect(page.getByRole('region', { name: 'Pinned train comparison' })).toContainText('Active journey');
   next = { ...next, trains: [...next.trains].reverse() };
   await page.clock.runFor(5000);
   await expect(button).toBeFocused();
@@ -55,7 +55,7 @@ test('complete outcomes, escaped text, selection and focus survive replacement; 
   await page.clock.runFor(5000);
   await expect(trainItems(page)).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Trains', exact: true })).toBeFocused();
-  await expect(notice(page)).toContainText('selected train was removed');
+  await expect(notice(page)).toContainText('pinned train was removed');
   await expect.poll(() => markers(page)).toHaveLength(0);
 });
 
@@ -80,7 +80,9 @@ test('map clicks share selection; refresh and explicit fit preserve one map and 
   await expect(card.getByRole('button', { name: 'Close train details' })).toHaveCount(0);
   await page.mouse.click(box.x + point.x, box.y + point.y);
   await expect(page.getByRole('button', { name: 'Run run-one' })).toHaveAttribute('aria-pressed', 'true');
-  await expect(card.getByRole('button', { name: 'Close train details' })).toBeVisible();
+  const dock = page.locator('.train-dock .marker-card');
+  await expect(page.locator('.route-map .marker-card')).toHaveCount(0);
+  await expect(dock).toHaveAttribute('data-state', 'active');
   await expect.poll(() => page.evaluate(() => [...new Set(window.testMap.querySourceFeatures('selected-route').map(feature => feature.properties.phase))])).toEqual(['upcoming']);
   await expect.poll(() => page.evaluate(() => [...new Set(window.testMap.querySourceFeatures('selected-stops').map(feature => `${feature.properties.phase}:${feature.properties.next}`))])).toEqual(['visited:false', 'upcoming:true']);
   await page.getByRole('button', { name: 'Zoom in', exact: true }).click();
@@ -92,18 +94,17 @@ test('map clicks share selection; refresh and explicit fit preserve one map and 
   const fitted = await page.evaluate(() => ({ center: window.testMap.getCenter(), zoom: window.testMap.getZoom() }));
   expect(fitted.zoom).toBeLessThanOrEqual(camera.zoom);
   expect(fitted.center).not.toEqual(camera.center);
-  await card.getByRole('button', { name: 'Close train details' }).click();
+  await dock.getByRole('button', { name: 'Remove' }).click();
   await expect(page.getByRole('button', { name: 'Run run-one' })).toHaveAttribute('aria-pressed', 'false');
   await expect(card).toHaveCount(0);
 });
 
-test('empty map, Escape, and the selected list button clear route selection', async ({ page }) => {
+test('desktop Escape and empty map preserve pins while pin toggles clear route selection', async ({ page }) => {
   await start(page);
   const button = page.getByRole('button', { name: 'Run run-one' });
   await button.click();
   await page.keyboard.press('Escape');
-  await expect(button).toHaveAttribute('aria-pressed', 'false');
-  await button.click();
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
   await button.click();
   await expect(button).toHaveAttribute('aria-pressed', 'false');
   await expect.poll(() => markers(page)).toHaveLength(1);
@@ -113,6 +114,8 @@ test('empty map, Escape, and the selected list button clear route selection', as
   await page.mouse.click(box.x + point.x, box.y + point.y);
   await expect(button).toHaveAttribute('aria-pressed', 'true');
   await page.mouse.click(box.x + 8, box.y + 8);
+  await expect(button).toHaveAttribute('aria-pressed', 'true');
+  await page.mouse.click(box.x + point.x, box.y + point.y);
   await expect(button).toHaveAttribute('aria-pressed', 'false');
   await expect.poll(() => page.evaluate(() => window.testMap.querySourceFeatures('selected-route'))).toEqual([]);
 });
@@ -306,7 +309,8 @@ for (const width of [1440, 390, 320]) test(`train evidence and controls fit ${wi
   await expect(trainItems(page)).toHaveCount(1);
   await expect(page.getByText('Map unavailable.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Run run-one' }).click();
-  await expect(page.getByRole('region', { name: 'Train details' })).toContainText('Observation age');
+  if (width > 700) await expect(page.getByRole('region', { name: 'Pinned train comparison' })).toContainText('Active journey');
+  else await expect(page.getByRole('region', { name: 'Train details' })).toContainText('Observation age');
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
@@ -324,7 +328,8 @@ test('null coordinates remove a marker while keeping its selected outcome and re
   await expect(page.locator('.position-warning')).toContainText('1 train: No trustworthy arrival/departure interval');
   await expect(page.getByRole('button', { name: 'Run run-one' })).toBeFocused();
   await expect.poll(() => markers(page)).toHaveLength(0);
-  await expect(page.getByRole('region', { name: 'Train details' })).toContainText('insufficient_timing');
+  await expect(trainItems(page)).toContainText('insufficient_timing');
+  await expect(page.getByRole('region', { name: 'Pinned train comparison' })).toContainText('Next stationUnavailable');
 });
 
 for (const [status, body, message] of [
@@ -425,7 +430,7 @@ test('production bundle connects train list and details', async ({ page }) => {
   await expect(trainItems(page)).toHaveCount(1);
   await expect(notice(page)).toContainText('Train updates available');
   await page.getByRole('button', { name: 'Run run-one' }).click();
-  await expect(page.getByRole('region', { name: 'Train details' })).toContainText('Realtime inference');
+  await expect(page.getByRole('region', { name: 'Pinned train comparison' })).toContainText('Realtime estimate');
 });
 
 test('warnings appear on positioned and unpositioned trains, survive simulation and retention, and clear on replacement', async ({ page }) => {
@@ -446,29 +451,29 @@ test('warnings appear on positioned and unpositioned trains, survive simulation 
   await expect(trainItems(page).nth(1)).toContainText('insufficient_timing');
   await expect(page.getByText('1 of 2 train outcomes is positioned on the map.', { exact: false })).toBeVisible();
   await page.getByRole('button', { name: 'Run run-one', exact: true }).click();
-  const details = page.getByRole('region', { name: 'Train details', exact: true });
-  await expect(sections).toHaveCount(3);
-  await expect(details).toContainText('exact trip ID or unique origin/path suffix was preferred');
-  await expect(details).toContainText('stop ID was preferred');
-  await expect(details).toContainText('The API reported a reconciliation warning: <img src=x onerror=unexpected()>.');
+  const details = page.getByRole('region', { name: 'Pinned train comparison', exact: true });
+  await expect(sections).toHaveCount(2);
+  await expect(trainItems(page).first()).toContainText('exact trip ID or unique origin/path suffix was preferred');
+  await expect(trainItems(page).first()).toContainText('stop ID was preferred');
+  await expect(trainItems(page).first()).toContainText('The API reported a reconciliation warning: <img src=x onerror=unexpected()>.');
   await expect(page.locator('.train-info img, .train-info script')).toHaveCount(0);
   next = { ...next, trains: next.trains.map(t => t.trip_instance_id === 'run-one'
     ? { ...t, position_basis: 'schedule_fallback', freshness: 'stale', movement_state: 'unknown', fallback_reason: 'stale_realtime_counterpart' } : t) };
   await page.clock.runFor(5000);
-  await expect(details).toContainText('Schedule simulation');
-  await expect(sections).toHaveCount(3);
+  await expect(details).toContainText('Schedule estimate');
+  await expect(sections).toHaveCount(2);
   fail = true;
   await page.clock.runFor(5000);
   await expect(notice(page)).toContainText('could not be reached');
-  await expect(details).toContainText('Was a schedule simulation');
-  await expect(sections).toHaveCount(3);
+  await expect(trainItems(page).first()).toContainText('Was a schedule simulation');
+  await expect(sections).toHaveCount(2);
   await page.getByRole('button', { name: 'Pause updates' }).click();
-  await expect(sections).toHaveCount(3);
+  await expect(sections).toHaveCount(2);
   fail = false;
   next = { ...next, trains: next.trains.map(t => ({ ...t, reconciliation_warnings: [] })) };
   await page.getByRole('button', { name: 'Resume updates' }).click();
   await expect(sections).toHaveCount(0);
-  await expect(details).toContainText('run-one');
+  await expect(details).toContainText('Active journey');
   await expect(trainItems(page)).toHaveCount(2);
 });
 
@@ -507,21 +512,23 @@ test('upcoming departures have separate counts, Eastern times, selection, and no
   const failures = page.getByRole('region', { name: 'Why some trains are not on the map' });
   await expect(failures).toContainText('insufficient_timing');
   await expect(failures).not.toContainText('not_started');
-  await page.getByRole('button', { name: 'Run upcoming', exact: true }).click();
-  const details = page.getByRole('region', { name: 'Train details', exact: true });
-  await expect(details).toContainText('Upcoming');
-  await expect(details.locator('time')).toHaveAttribute('datetime', '2026-09-14T12:05:00Z');
-  await expect(details.locator('time')).toContainText('8:05:00 AM EDT');
-  await expect(details).not.toContainText('Position unavailable:');
+  const upcomingButton = page.getByRole('button', { name: 'Run upcoming', exact: true });
+  const upcomingItem = upcomingButton.locator('..');
+  await upcomingButton.click();
+  const details = page.getByRole('region', { name: 'Pinned train comparison', exact: true });
+  await expect(upcomingItem).toContainText('Upcoming');
+  await expect(upcomingItem.locator('time')).toHaveAttribute('datetime', '2026-09-14T12:05:00Z');
+  await expect(upcomingItem.locator('time')).toContainText('8:05:00 AM EDT');
+  await expect(upcomingItem).not.toContainText('Position unavailable:');
+  await expect(details).toContainText('Realtime estimate');
   await expect(page.getByRole('region', { name: 'Reconciliation warnings', exact: true })).toContainText('vehicle observation was excluded');
   next = { ...next, trains: next.trains.map(t => t.trip_instance_id === 'upcoming'
     ? { ...t, latitude: 40.76, longitude: -73.97, shape_distance_meters: 0, next_station_id: 'S4', next_stop_sequence: 2,
       next_arrival_at: '2026-09-14T12:10:00Z', movement_state: 'inferred_moving', no_position_reason: null, predicted_departure_at: null } : t) };
   await page.clock.runFor(5000);
   await expect.poll(() => markers(page)).toHaveLength(2);
-  await expect(page.getByRole('button', { name: 'Run upcoming', exact: true })).toHaveAttribute('aria-pressed', 'true');
-  await expect(details).toContainText('Realtime inference');
-  await expect(details.locator('time')).toHaveCount(1);
-  await expect(details.locator('time')).toHaveAttribute('datetime', '2026-09-14T12:10:00Z');
+  await expect(upcomingButton).toHaveAttribute('aria-pressed', 'true');
+  await expect(details).toContainText('Realtime estimate');
+  await expect(details).toContainText('8:10 AM EDT');
   await expect(page.getByText('2 positioned · 0 upcoming · 1 position unavailable')).toBeVisible();
 });

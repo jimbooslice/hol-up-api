@@ -3,6 +3,7 @@ import { afterEach, test } from 'node:test';
 import { advancedAge, compatible, directionText, isPositions, isStale, journeyView, loadPositions, needsGeometry, PositionsError, reasonText, routeStyle, trainIdentity, warningText } from './positions.ts';
 import { positions, train, withVersion } from '../e2e/fixtures/positions.ts';
 import { geometry } from '../e2e/fixtures/geometry.ts';
+import type { RouteGeometry } from './geometry.ts';
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -70,6 +71,38 @@ test('builds route-colored journey progress and station states', () => {
   assert.deepEqual(view.stops.features.map(feature => [feature.properties?.phase, feature.properties?.next]), [['visited', false], ['upcoming', true]]);
   assert.deepEqual(routeStyle('A'), { color: '#0039A6', text: '#FFFFFF' });
   assert.deepEqual(routeStyle('unknown'), { color: '#334155', text: '#FFFFFF' });
+});
+
+test('the remaining trip ends at the scheduled terminal, not the shape end', () => {
+  const meterPerDegree = 6371008.8 * Math.PI / 180;
+  const station = (id: string, longitude: number) => ({ type: 'Feature' as const, id,
+    geometry: { type: 'Point' as const, coordinates: [longitude, 0] as [number, number] },
+    properties: { name: id, reason: null } });
+  const stop = (station_id: string, stop_sequence: number, distance_meters: number | null) => ({
+    stop_id: station_id, station_id, stop_sequence, distance_meters, association: 'shape_dist_traveled', reason: null,
+  });
+  const pattern = { ...geometry.patterns[0]!, service_pattern_id: 'short-turn', shape_id: 'branch', stops: [
+    stop('origin', 1, 0), stop('next', 2, 0.006 * meterPerDegree), stop('terminal', 3, 0.01 * meterPerDegree),
+  ] };
+  const route: RouteGeometry = { ...geometry, stations: [station('origin', 0), station('next', 0.006), station('terminal', 0.01), station('beyond', 0.02)],
+    shapes: [{ type: 'Feature', id: 'branch', geometry: { type: 'LineString', coordinates: [[0, 0], [0.01, 0], [0.02, 0]] },
+      properties: { usable: true, reason: null } }, { type: 'Feature', id: 'other', geometry: { type: 'LineString', coordinates: [[0, 0], [0, 0.02]] },
+      properties: { usable: true, reason: null } }], patterns: [pattern] };
+  const current = { ...train, shape_id: 'branch', service_pattern_id: 'short-turn', shape_distance_meters: 0.002 * meterPerDegree,
+    next_station_id: 'next', next_stop_sequence: 2 };
+  const view = journeyView(route, current);
+  assert.equal(view.destination, 'terminal');
+  assert.ok(Math.abs(view.lines.features.find(feature => feature.properties?.phase === 'upcoming')!.geometry.coordinates.at(-1)![0]! - 0.01) < 1e-9);
+  assert.ok(Math.abs(view.nextLeg.features[0]!.geometry.coordinates.at(-1)![0]! - 0.006) < 1e-9);
+  assert.equal(view.stops.features.length, 3);
+  assert.equal(journeyView(route, { ...current, shape_id: 'other' }).lines.features.length, 0);
+  assert.equal(journeyView(route, { ...current, shape_distance_meters: 0.03 * meterPerDegree }).lines.features.length, 0);
+  assert.equal(journeyView(route, { ...current, shape_distance_meters: 0.015 * meterPerDegree }).lines.features.length, 0);
+  const unknownTerminal = { ...route, patterns: [{ ...pattern, stops: [...pattern.stops.slice(0, -1), stop('terminal', 3, null)] }] };
+  assert.deepEqual(journeyView(unknownTerminal, current).lines.features.map(feature => feature.properties?.phase), ['visited']);
+  assert.equal(journeyView(unknownTerminal, current).nextLeg.features.length, 1);
+  const unknownNext = { ...route, patterns: [{ ...pattern, stops: [pattern.stops[0]!, stop('next', 2, null), pattern.stops[2]!] }] };
+  assert.equal(journeyView(unknownNext, current).nextLeg.features.length, 0);
 });
 
 test('direction includes the terminal without inventing missing information', () => {

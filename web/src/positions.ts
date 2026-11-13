@@ -188,9 +188,9 @@ function splitLine(coordinates: [number, number][], requested: number) {
     const split: [number, number] = [((a[0] + fraction * delta + 540) % 360) - 180, a[1] + fraction * (b[1] - a[1])];
     const past = [...coordinates.slice(0, i), split];
     const upcoming = [split, ...coordinates.slice(i)];
-    return { past: past.length > 1 && distance > 0 ? past : null, upcoming: upcoming.length > 1 && distance < total ? upcoming : null };
+    return { past: past.length > 1 && distance > 0 ? past : null, upcoming: upcoming.length > 1 && distance < total ? upcoming : null, total };
   }
-  return { past: coordinates, upcoming: null };
+  return { past: coordinates, upcoming: null, total };
 }
 
 export function journeyView(geometry: RouteGeometry, train: Train): JourneyView {
@@ -199,21 +199,35 @@ export function journeyView(geometry: RouteGeometry, train: Train): JourneyView 
   const stations = new Map(geometry.stations.map(station => [station.id, station]));
   const destination = pattern?.stops.at(-1) ? stations.get(pattern.stops.at(-1)!.station_id)?.properties.name ?? null : null;
   const nextStation = train.next_station_id ? stations.get(train.next_station_id)?.properties.name ?? null : null;
-  if (!pattern || !shape?.geometry || train.shape_distance_meters === null) return { lines: emptyLines(), nextLeg: emptyLines(), stops: emptyStops(), destination, nextStation };
+  if (!pattern || pattern.shape_id !== train.shape_id || !shape?.geometry || train.shape_distance_meters === null) {
+    return { lines: emptyLines(), nextLeg: emptyLines(), stops: emptyStops(), destination, nextStation };
+  }
   const style = routeStyle(train.route_id);
   const split = splitLine(shape.geometry.coordinates, train.shape_distance_meters);
+  if (train.shape_distance_meters > split.total) return { lines: emptyLines(), nextLeg: emptyLines(), stops: emptyStops(), destination, nextStation };
+  const terminalDistance = pattern.stops.at(-1)?.distance_meters ?? null;
+  const usableTerminal = terminalDistance !== null && terminalDistance >= 0 && terminalDistance <= split.total;
+  if (usableTerminal && train.shape_distance_meters > terminalDistance) {
+    return { lines: emptyLines(), nextLeg: emptyLines(), stops: emptyStops(), destination, nextStation };
+  }
   const lines: JourneyView['lines'] = { type: 'FeatureCollection', features: [] };
   if (split.past) lines.features.push({ type: 'Feature', properties: { phase: 'visited', color: style.color }, geometry: { type: 'LineString', coordinates: split.past } });
-  if (split.upcoming) lines.features.push({ type: 'Feature', properties: { phase: 'upcoming', color: style.color }, geometry: { type: 'LineString', coordinates: split.upcoming } });
+  if (split.upcoming && usableTerminal && terminalDistance > train.shape_distance_meters) {
+    const coordinates = splitLine(split.upcoming, terminalDistance - train.shape_distance_meters).past;
+    if (coordinates) lines.features.push({ type: 'Feature', properties: { phase: 'upcoming', color: style.color }, geometry: { type: 'LineString', coordinates } });
+  }
   const nextLeg = emptyLines();
   const nextStop = pattern.stops.find(stop => stop.station_id === train.next_station_id && stop.stop_sequence === train.next_stop_sequence);
-  if (split.upcoming && nextStop?.distance_meters !== null && nextStop?.distance_meters !== undefined && nextStop.distance_meters > train.shape_distance_meters) {
+  if (split.upcoming && nextStop?.distance_meters !== null && nextStop?.distance_meters !== undefined
+    && nextStop.distance_meters > train.shape_distance_meters && nextStop.distance_meters <= split.total
+    && (!usableTerminal || nextStop.distance_meters <= terminalDistance)) {
     const coordinates = splitLine(split.upcoming, nextStop.distance_meters - train.shape_distance_meters).past;
     if (coordinates) nextLeg.features.push({ type: 'Feature', properties: { color: style.color }, geometry: { type: 'LineString', coordinates } });
   }
   const stops: JourneyView['stops'] = { type: 'FeatureCollection', features: pattern.stops.flatMap(stop => {
     const station = stations.get(stop.station_id);
-    if (!station?.geometry || stop.distance_meters === null) return [];
+    if (!station?.geometry || stop.distance_meters === null || stop.distance_meters < 0 || stop.distance_meters > split.total
+      || (usableTerminal && stop.distance_meters > terminalDistance)) return [];
     return [{ type: 'Feature' as const, properties: { phase: stop.distance_meters <= train.shape_distance_meters! ? 'visited' : 'upcoming',
       next: stop.station_id === train.next_station_id && stop.stop_sequence === train.next_stop_sequence, color: style.color }, geometry: station.geometry }];
   }) };

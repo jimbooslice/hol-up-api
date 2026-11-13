@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { alphabeticalStations } from './geometry';
 import type { RouteGeometryErrorKind } from './geometry';
 import { RouteMap } from './RouteMap';
 import './styles.css';
 import { useTrainData } from './useTrainData';
-import { advancedAge, compatible, isStale, reasonText, trainIdentity, type PositionsErrorKind } from './positions';
+import { advancedAge, compatible, directionText, isStale, journeyView, reasonText, routeStyle, trainIdentity, type PositionsErrorKind } from './positions';
 import { TrainInfo, sourceAge } from './TrainInfo';
+import { initialTrainSelection, trainSelectionReducer } from './trainSelection';
 
 const failureMessages: Record<RouteGeometryErrorKind, string> = {
   'schedule-unavailable': 'Schedule data is temporarily unavailable.',
@@ -16,25 +17,85 @@ const failureMessages: Record<RouteGeometryErrorKind, string> = {
   timeout: 'The route request timed out.',
 };
 
+const trainName = (train: { trip_instance_id: string | null; source_record_id: string | null; source_name: string; entity_id: string; source_index: number }) =>
+  train.trip_instance_id ? `Run ${train.trip_instance_id}` : `Source record ${train.source_record_id ?? `${train.source_name} / ${train.entity_id} / ${train.source_index}`}`;
+
+function useDesktopLayout() {
+  const query = '(min-width: 701px)';
+  const [desktop, setDesktop] = useState(() => matchMedia(query).matches);
+  useEffect(() => {
+    const media = matchMedia(query), change = () => setDesktop(media.matches);
+    media.addEventListener('change', change);
+    return () => media.removeEventListener('change', change);
+  }, []);
+  return desktop;
+}
+
 export function App() {
   const data = useTrainData();
   const { geometry: ready, geometryError, snapshot, failure, paused, hidden, retained, now } = data;
-  const [selected, setSelected] = useState<string | null>(null);
+  const desktop = useDesktopLayout();
+  const [selection, dispatch] = useReducer(trainSelectionReducer, initialTrainSelection);
   const [removal, setRemoval] = useState('');
   const heading = useRef<HTMLHeadingElement>(null);
+  const replacementDialog = useRef<HTMLDialogElement>(null);
+  const replacementTrigger = useRef<HTMLElement | null>(null);
+  const replacementWasOpen = useRef(false);
   // Stable relative order prevents DOM moves from dropping keyboard focus on replacement.
   const trains = [...(snapshot?.data.trains ?? [])].sort((a, b) => {
     const left = trainIdentity(a), right = trainIdentity(b);
     return left < right ? -1 : left > right ? 1 : 0;
   });
-  const selectedTrain = trains.find(t => trainIdentity(t) === selected);
+  const selectedTrain = trains.find(t => trainIdentity(t) === selection.active);
   useEffect(() => {
-    if (selected && !selectedTrain) {
-      setSelected(null); heading.current?.focus(); setRemoval('The selected train was removed from the latest response.');
+    if (!snapshot) return;
+    const identities = snapshot.data.trains.map(trainIdentity);
+    const accepted = new Set(identities);
+    const removed = selection.pinned.filter(identity => !accepted.has(identity));
+    const candidateRemoved = !!selection.pendingReplacement && !accepted.has(selection.pendingReplacement);
+    dispatch({ type: 'sync', identities });
+    if (removed.length) {
+      setRemoval(`${removed.length === 1 ? 'A pinned train was' : `${removed.length} pinned trains were`} removed from the latest response.`);
+      if (removed.length === selection.pinned.length && !selection.pendingReplacement) heading.current?.focus();
+    } else if (candidateRemoved) setRemoval('The train awaiting replacement was removed from the latest response. Replacement was canceled.');
+  }, [snapshot]);
+  useEffect(() => {
+    if (desktop || selection.pinned.length < 2) return;
+    dispatch({ type: 'collapse' });
+    setRemoval('The inactive pinned train was removed because phone layouts support one selected train.');
+  }, [desktop]);
+  useEffect(() => {
+    const dialog = replacementDialog.current;
+    if (!dialog) return;
+    if (selection.pendingReplacement) {
+      replacementWasOpen.current = true;
+      if (!dialog.open) dialog.showModal();
+      const frame = requestAnimationFrame(() => dialog.querySelector<HTMLButtonElement>('[data-replacement-choice]')?.focus());
+      return () => cancelAnimationFrame(frame);
     }
-  }, [selected, selectedTrain]);
-  const selectTrain = useCallback((identity: string | null) => { setSelected(identity); setRemoval(''); }, []);
+    if (!replacementWasOpen.current) return;
+    if (dialog.open) dialog.close();
+    replacementWasOpen.current = false;
+    const trigger = replacementTrigger.current;
+    replacementTrigger.current = null;
+    if (trigger?.isConnected) trigger.focus({ preventScroll: true });
+  }, [selection.pendingReplacement]);
+  const toggleTrain = useCallback((identity: string, trigger?: HTMLElement) => {
+    replacementTrigger.current = trigger ?? null;
+    dispatch({ type: 'toggle', identity, desktop });
+    setRemoval('');
+  }, [desktop]);
+  const activateTrain = useCallback((identity: string) => { dispatch({ type: 'activate', identity }); setRemoval(''); }, []);
+  const removeTrain = useCallback((identity: string) => { dispatch({ type: 'toggle', identity, desktop: true }); setRemoval(''); }, []);
+  const clearTrains = useCallback(() => { dispatch({ type: 'clear' }); setRemoval(''); }, []);
   const compatibleVersions = compatible(ready, snapshot?.data ?? null);
+  const replacementDetails = (train: (typeof trains)[number]) => ({
+    direction: directionText(train.direction, null),
+    nextStation: compatibleVersions && ready ? journeyView(ready, train).nextStation ?? 'unavailable' : 'unavailable',
+    style: routeStyle(train.route_id),
+  });
+  const incomingTrain = trains.find(train => trainIdentity(train) === selection.pendingReplacement);
+  const incomingDetails = incomingTrain ? replacementDetails(incomingTrain) : null;
   const positioned = trains.filter(train => train.latitude !== null && train.longitude !== null).length;
   const upcoming = trains.filter(train => train.no_position_reason === 'not_started').length;
   const unavailableReasons = Object.entries(trains.reduce<Record<string, number>>((counts, train) => {
@@ -98,7 +159,9 @@ export function App() {
       <div className="overview">
         <section className="panel map-panel" aria-labelledby="map-heading">
           <h2 id="map-heading">A-line map</h2>
-          {ready ? <RouteMap geometry={ready} positions={snapshot?.data ?? null} selected={selected} onSelect={selectTrain} /> : <div className="map-placeholder">
+          {ready ? <RouteMap geometry={ready} positions={snapshot?.data ?? null} pinned={selection.pinned} active={selection.active}
+            pendingReplacement={selection.pendingReplacement} desktop={desktop} onToggle={toggleTrain} onActivate={activateTrain}
+            onRemove={removeTrain} onClear={clearTrains} /> : <div className="map-placeholder">
             <h3>{!ready && !geometryError ? 'Loading map data' : 'Map data unavailable'}</h3>
             <p>The route and its branches will appear here when route data is available.</p>
           </div>}
@@ -138,8 +201,10 @@ export function App() {
                 </li>)}</ul>
               </section>}
               <ul className="train-list">{trains.map(train => <li key={trainIdentity(train)}>
-                <button type="button" aria-pressed={selected === trainIdentity(train)} onClick={() => selectTrain(selected === trainIdentity(train) ? null : trainIdentity(train))}>
-                  {train.trip_instance_id ? `Run ${train.trip_instance_id}` : `Source record ${train.source_record_id ?? `${train.source_name} / ${train.entity_id} / ${train.source_index}`}`}
+                <button type="button" aria-pressed={selection.pinned.includes(trainIdentity(train))}
+                  data-active={selection.active === trainIdentity(train) || undefined}
+                  onClick={event => toggleTrain(trainIdentity(train), event.currentTarget)}>
+                  {trainName(train)}
                 </button>
                 <TrainInfo train={train} snapshot={snapshot} now={now} retained={retained} geometry={ready} />
               </li>)}</ul>
@@ -149,14 +214,45 @@ export function App() {
         </div>
       </div>
 
-      <section className="panel details" aria-labelledby="details-heading">
+      {!desktop && <section className="panel details" aria-labelledby="details-heading">
         <h2 id="details-heading">Train details</h2>
         {selectedTrain && snapshot ? <>
-          <h3>{selectedTrain.trip_instance_id ? `Run ${selectedTrain.trip_instance_id}` : `Source record ${selectedTrain.source_record_id ?? selectedTrain.entity_id}`}</h3>
+          <h3>{trainName(selectedTrain)}</h3>
           <TrainInfo train={selectedTrain} snapshot={snapshot} now={now} retained={retained} geometry={ready} />
         </> : <p>Select a train from the map or list to inspect its evidence.</p>}
-      </section>
+      </section>}
     </main>
+
+    <dialog ref={replacementDialog} className="replacement-dialog" aria-labelledby="replacement-heading"
+      onCancel={event => { event.preventDefault(); dispatch({ type: 'cancel-replacement' }); }}>
+      <h2 id="replacement-heading">Replace a pinned train</h2>
+      {incomingTrain && incomingDetails && <section className="replacement-incoming" aria-label="New train to pin">
+        <p className="replacement-kicker">Coming up</p>
+        <div className="replacement-ride">
+          <span className="replacement-line-marker" style={{ backgroundColor: incomingDetails.style.color, color: incomingDetails.style.text }} aria-hidden="true">{incomingTrain.route_id}</span>
+          <span className="replacement-copy"><strong>{incomingDetails.direction}</strong><small>Next station {incomingDetails.nextStation}</small></span>
+        </div>
+      </section>}
+      <p>Choose the pinned train to replace.</p>
+      <div className="replacement-choices">
+        {selection.pinned.map((identity, index) => {
+          const train = trains.find(item => trainIdentity(item) === identity);
+          const details = train ? replacementDetails(train) : null;
+          return <button type="button" className="replacement-choice" key={identity} data-replacement-choice={index === 0 || undefined}
+            aria-label={details ? `Replace ${details.direction}, next station ${details.nextStation}` : 'Replace pinned train'}
+            onClick={() => dispatch({ type: 'replace', identity })}>
+            <span className="replacement-arrow" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h15m-6-6 6 6-6 6" /></svg></span>
+            <span className="replacement-target">
+              {train && details && <>
+                <span className="replacement-line-marker" style={{ backgroundColor: details.style.color, color: details.style.text }} aria-hidden="true">{train.route_id}</span>
+                <span className="replacement-copy"><strong>{details.direction}</strong><small>Next station {details.nextStation}</small></span>
+              </>}
+            </span>
+          </button>;
+        })}
+        <button type="button" className="replacement-cancel" onClick={() => dispatch({ type: 'cancel-replacement' })}>Cancel</button>
+      </div>
+    </dialog>
 
     <footer className="site-footer">
       <p>Hol Up · An independent transit prototype</p>

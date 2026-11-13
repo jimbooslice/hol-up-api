@@ -73,21 +73,46 @@ main { padding-block: 2.5rem; }
   .site-footer { flex-direction: column; gap: 0.25rem; }
 }
 
-.map-stage { position: relative; }
+.map-workspace { min-width: 0; }
+.map-stage { position: relative; min-width: 0; }
 .route-map { height: clamp(480px, 70dvh, 800px); width: 100%; border: 1px solid var(--border); border-radius: 0.5rem; }
-.train-marker-overlay { position: absolute; top: 0; left: 0; width: 100%; z-index: 2; pointer-events: none; overflow: hidden; }
-.train-marker-position { position: absolute; width: 44px; height: 44px; transform: translate(-50%, -50%); pointer-events: auto; }
-.train-marker { position: relative; display: grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; cursor: pointer; transform: translateY(0); }
+.train-marker-overlay { position: absolute; top: 0; left: 0; width: 100%; pointer-events: none; overflow: hidden; }
+.train-directions, .train-badges { position: absolute; inset: 0; pointer-events: none; }
+.train-direction-position, .train-marker-position { position: absolute; width: 44px; height: 44px; transform: translate(-50%, -50%); pointer-events: none; }
+.train-direction-position { z-index: 1; }
+.train-marker-position { z-index: 2; }
+.train-marker-position:has(.train-marker[data-previewed], .train-marker[data-active]) { z-index: 5; }
+.train-direction-position[data-hover-hidden], .train-marker-position[data-hover-hidden] { opacity: 0; }
+.train-marker-position[data-hover-hidden] .train-marker { pointer-events: none; }
+.train-marker-position[data-hover-hidden]:has(.train-marker:focus-visible) { opacity: 1; }
+.train-marker-position[data-hover-hidden] .train-marker:focus-visible { pointer-events: auto; }
+.train-marker-overlay:not(:has(.train-marker[data-previewed])) .train-marker-position[data-hover-hidden],
+.train-marker-overlay:not(:has(.train-marker[data-previewed])) .train-direction-position[data-hover-hidden] { opacity: 1; }
+.train-marker-overlay:not(:has(.train-marker[data-previewed])) .train-marker-position[data-hover-hidden] .train-marker { pointer-events: auto; }
+.train-direction-dot { position: absolute; width: 7px; height: 7px; border: 1px solid white; border-radius: 50%; background: var(--route-color); transform: translate(-50%, -50%); box-shadow: 0 0 0 1px #18263a; }
+.train-direction-chip { position: absolute; left: 42px; top: 50%; max-width: 160px; padding: 0.15rem 0.4rem; overflow: hidden; border: 1px solid var(--route-color); border-radius: 0.3rem; background: white; color: #18263a; font-size: 0.7rem; font-weight: 700; line-height: 1.3; text-overflow: ellipsis; white-space: nowrap; transform: translateY(-50%); box-shadow: 0 1px 3px rgb(24 38 58 / 20%); }
+.train-direction-chip-left { left: auto; right: 42px; }
+.train-direction-position[data-active] .train-direction-chip,
+.train-marker-overlay:has(.train-marker[data-previewed]) .train-direction-chip { display: none; }
+.train-marker { position: relative; display: grid; place-items: center; flex: 0 0 44px; width: 44px; height: 44px; padding: 0; border: 0; background: transparent; cursor: pointer; pointer-events: auto; transform: translateY(0); }
 .train-marker-badge { position: relative; z-index: 1; display: grid; place-items: center; width: 28px; height: 28px; border: 2px solid var(--route-color); border-radius: 50%; outline: 2px solid #566477; outline-offset: 1px; background: var(--route-color); color: var(--route-text); font: 800 0.9rem/1 system-ui, sans-serif; transition: filter 160ms ease, opacity 160ms ease, transform 160ms ease; }
 .train-marker[data-simulation] .train-marker-badge { background: white; color: var(--route-color); }
-.train-marker-overlay:has(.train-marker[data-previewed], .train-marker[aria-pressed="true"]) .train-marker:not([data-previewed]):not([aria-pressed="true"]) .train-marker-badge { filter: saturate(25%); opacity: 0.55; transform: scale(0.86); }
 .train-marker:focus-visible { outline: none; }
 .train-marker:hover .train-marker-badge, .train-marker:focus-visible .train-marker-badge { outline-style: dashed; }
-.train-marker[aria-pressed="true"] .train-marker-badge { outline: 3px solid #b54708; outline-offset: 2px; }
-.train-marker[aria-pressed="true"]:focus-visible .train-marker-badge::after { content: ''; position: absolute; inset: -9px; border: 2px dashed #18263a; border-radius: 50%; }
+.train-marker[data-pinned] .train-marker-badge { outline: 3px solid #18263a; outline-offset: 2px; }
+.train-marker[data-active] .train-marker-badge { outline-color: #b54708; box-shadow: 0 0 0 3px white, 0 0 0 6px #b54708; }
+.train-marker[data-pinned]:focus-visible .train-marker-badge::after { content: ''; position: absolute; inset: -9px; border: 2px dashed #18263a; border-radius: 50%; }
 .map-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-block: 1rem; }
 .map-controls button { min-width: 44px; min-height: 44px; padding: 0.5rem 0.75rem; border: 1px solid var(--border); border-radius: 0.5rem; background: white; color: var(--blue); font: inherit; font-weight: 650; cursor: pointer; }
 .map-controls button:disabled { color: var(--muted); cursor: default; }
+.map-options { width: min(100%, 240px); margin-top: 0.75rem; padding: 0.85rem; border: 1px solid var(--border); border-radius: 0.5rem; background: #f6f8fc; }
+.map-options[hidden] { display: none; }
+.map-options-heading { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.map-options-heading button { min-width: 44px; min-height: 44px; border: 1px solid var(--border); border-radius: 0.4rem; background: white; color: var(--blue); font: inherit; cursor: pointer; }
+.map-options fieldset { margin: 0.75rem 0 0; padding: 0; border: 0; }
+.map-options legend { font-weight: 650; }
+.map-option { display: flex; align-items: center; gap: 0.4rem; min-height: 44px; font-size: 0.875rem; cursor: pointer; }
+.map-option input { width: 1.1rem; height: 1.1rem; accent-color: var(--blue); }
 .map-status, .map-attribution { margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); }
 .map-attribution a { display: inline-block; padding-block: 0.5rem; }
 .station-list { margin: 1rem 0 0; padding-left: 1.25rem; }
@@ -97,6 +122,13 @@ main { padding-block: 2.5rem; }
 @media (max-width: 1023px) {
   .overview { grid-template-columns: minmax(0, 1fr); }
   .route-map { height: clamp(320px, 55dvh, 560px); }
+}
+@media (min-width: 1280px) {
+  .map-workspace-open { display: grid; grid-template-columns: minmax(0, 1fr) 240px; gap: 0.75rem; }
+  .map-workspace-open .map-options { width: 240px; height: fit-content; margin-top: 0; }
+}
+@media (max-width: 700px) {
+  .map-options-trigger, .map-options, .train-directions { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .train-marker-badge { transition: none; } }
 
@@ -109,7 +141,12 @@ main { padding-block: 2.5rem; }
 .train-key { display: inline-block; width: 0.9rem; height: 0.9rem; border: 3px solid var(--blue); border-radius: 50%; vertical-align: -0.15rem; }
 .realtime-key { background: var(--blue); }
 .simulation-key { margin-left: 0.4rem; background: transparent; }
-.train-popup { z-index: 4; }
+.next-stop-label { position: absolute; z-index: 3; padding: 0.2rem 0.4rem; border: 2px solid var(--route-color); border-radius: 0.35rem; background: white; color: #18263a; font: 700 0.75rem/1.3 system-ui, sans-serif; overflow-wrap: anywhere; white-space: pre-line; pointer-events: none; box-shadow: 0 1px 3px rgb(24 38 58 / 20%); }
+.next-stop-label[hidden] { display: none; }
+/* Next-stop emphasis only: revert this rule independently of tooltip layout. */
+.next-stop-label { background: var(--route-color); color: var(--route-text, white); font-weight: 800; }
+.train-popup { z-index: 6; }
+.train-popup-pending { visibility: hidden; }
 .maplibregl-popup-content { padding: 0; border-radius: 0.7rem; box-shadow: 0 8px 24px rgb(24 38 58 / 20%); }
 .train-popup .maplibregl-popup-tip {
   display: block;
@@ -119,10 +156,19 @@ main { padding-block: 2.5rem; }
 .marker-card-measure { position: absolute; top: 0; left: 0; visibility: hidden; pointer-events: none; }
 .marker-card { max-width: 100%; padding: 0.85rem; border: 2px solid #8d98a8; border-radius: 0.7rem; background: white; color: #18263a; font: 0.8rem/1.4 system-ui, sans-serif; overflow-wrap: anywhere; }
 .marker-card[data-state="selected"] { border: 3px solid var(--route-color); box-shadow: 0 0 0 3px white; }
+.marker-card[data-state="active"] { border: 3px solid var(--route-color); }
+.marker-card[data-state="preview"] { border-color: var(--route-color); }
 .marker-card-state { margin-top: 0.45rem; font-size: 0.75rem; font-weight: 650; color: var(--muted); }
-.marker-card[data-state="selected"] .marker-card-state { color: #18263a; }
+.marker-card[data-state="selected"] .marker-card-state, .marker-card[data-state="active"] .marker-card-state { color: #18263a; }
 .marker-details-panel { margin-top: 0.75rem; }
+.marker-details-panel[hidden], .marker-preview-panel[hidden], .train-dock[hidden] { display: none; }
 .marker-details-panel .marker-card { width: 100% !important; box-shadow: none; }
+.marker-preview-panel:not([hidden]) { margin-bottom: 0.75rem; }
+.train-dock { display: grid; gap: 0.65rem; }
+.train-dock-heading { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.train-dock-heading button, .marker-card-controls button { min-height: 44px; padding: 0.45rem 0.7rem; border: 1px solid var(--border); border-radius: 0.4rem; background: white; color: var(--blue); font: inherit; font-weight: 650; cursor: pointer; }
+.marker-card-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.65rem; }
+.marker-card-controls button:disabled { color: var(--muted); cursor: default; }
 .map-hint { margin-top: 0.75rem; font-size: 0.8rem; color: var(--muted); }
 .marker-card-header { display: flex; align-items: center; gap: 0.55rem; }
 .marker-card-header strong { flex: 1; font-size: 0.9rem; }
@@ -131,6 +177,26 @@ main { padding-block: 2.5rem; }
 .marker-card dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.2rem 0.65rem; margin: 0.65rem 0 0; }
 .marker-card dt { font-weight: 650; }
 .marker-card dd { margin: 0; color: var(--muted); }
+.replacement-dialog { width: min(92vw, 30rem); padding: 1.25rem; border: 1px solid var(--border); border-radius: 0.8rem; color: #18263a; }
+.replacement-dialog::backdrop { background: rgb(24 38 58 / 55%); }
+.replacement-dialog p { margin-top: 0.5rem; color: var(--muted); }
+.replacement-incoming { margin-top: 1rem; padding: 0.8rem; border: 1px solid #ccdaf3; border-radius: 0.65rem; background: #edf3ff; }
+.replacement-dialog .replacement-kicker { margin: 0 0 0.5rem; font-size: 0.7rem; font-weight: 750; letter-spacing: 0.08em; text-transform: uppercase; color: #23416d; }
+.replacement-ride, .replacement-target { display: grid; grid-template-columns: 2.25rem minmax(0, 1fr); align-items: center; gap: 0.65rem; }
+.replacement-line-marker { display: grid; place-items: center; width: 2.25rem; height: 2.25rem; border-radius: 50%; font-weight: 800; line-height: 1; }
+.replacement-copy { display: grid; min-width: 0; color: #18263a; }
+.replacement-copy strong, .replacement-copy small { overflow-wrap: anywhere; }
+.replacement-copy small { color: var(--muted); font-size: 0.78rem; font-weight: 500; }
+.replacement-choices { display: grid; gap: 0.6rem; margin-top: 1rem; }
+.replacement-choice { display: grid; grid-template-columns: 0 minmax(0, 1fr); align-items: center; gap: 0; min-height: 52px; padding: 0; border: 0; background: transparent; color: var(--blue); font: inherit; cursor: pointer; text-align: left; transition: grid-template-columns 120ms ease, gap 120ms ease; }
+.replacement-target { min-height: 52px; padding: 0.55rem 0.7rem; border: 1px solid var(--border); border-radius: 0.55rem; background: white; transition: border-color 120ms ease; }
+.replacement-choice:hover { grid-template-columns: 2rem minmax(0, 1fr); gap: 0.4rem; }
+.replacement-choice:hover .replacement-target { border-color: var(--blue); }
+.replacement-arrow { display: grid; place-items: center; width: 100%; height: 2rem; overflow: hidden; opacity: 0; transition: opacity 120ms ease; }
+.replacement-choice:hover .replacement-arrow { opacity: 1; }
+.replacement-arrow svg { width: 1.75rem; height: 1.75rem; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.replacement-cancel { min-height: 44px; padding: 0.6rem 0.8rem; border: 1px solid var(--border); border-radius: 0.45rem; background: white; color: var(--blue); font: inherit; font-weight: 650; cursor: pointer; }
+@media (prefers-reduced-motion: reduce) { .replacement-choice, .replacement-target, .replacement-arrow { transition: none; } }
 .position-warning { margin-top: 0.75rem; padding: 0.75rem; border-left: 4px solid #b54708; background: #fff7ed; }
 .position-warning h3 { font-size: 0.9rem; }
 .position-warning ul { margin-bottom: 0; padding-left: 1.2rem; }

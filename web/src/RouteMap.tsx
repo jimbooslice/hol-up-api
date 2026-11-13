@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Map, setWorkerUrl, type ErrorEvent, type ExpressionSpecification, type GeoJSONSource, type StyleSpecification } from 'maplibre-gl';
+import { Map, setWorkerUrl, type ErrorEvent, type GeoJSONSource, type StyleSpecification } from 'maplibre-gl';
 import workerURL from 'maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { geometryBounds, mapFeatures, type RouteGeometry } from './geometry';
 import { compatible, directionText, journeyView, routeStyle, trainIdentity, type Positions, type Train } from './positions';
-import { createTrainInteraction } from './trainInteraction';
+import { createTrainInteraction, renderTrainDock, type TrainInteractionView } from './trainInteraction';
 import { TrainMarkers, type ProjectedTrain } from './TrainMarkers';
+import { directionTrail } from './directionTrail';
 
 setWorkerUrl(workerURL);
 
@@ -19,7 +20,6 @@ const fallbackStyle: StyleSpecification = {
 const fitOptions = { padding: 32, maxZoom: 14, duration: 0 };
 const emptyLines: GeoJSON.FeatureCollection<GeoJSON.LineString> = { type: 'FeatureCollection', features: [] };
 const emptyPoints: GeoJSON.FeatureCollection<GeoJSON.Point> = { type: 'FeatureCollection', features: [] };
-const emptyGradient = ['interpolate', ['linear'], ['line-progress'], 0, 'rgba(255, 255, 255, 0)', 1, 'rgba(255, 255, 255, 0)'] as ExpressionSpecification;
 
 function installGeometry(map: Map, geometry: RouteGeometry) {
   for (const layer of map.getStyle().layers) {
@@ -29,7 +29,7 @@ function installGeometry(map: Map, geometry: RouteGeometry) {
   if (!map.getSource('shapes')) map.addSource('shapes', { type: 'geojson', data: features.shapes, promoteId: 'feature_id' });
   if (!map.getSource('stations')) map.addSource('stations', { type: 'geojson', data: features.stations, promoteId: 'feature_id' });
   if (!map.getSource('selected-route')) map.addSource('selected-route', { type: 'geojson', data: emptyLines });
-  if (!map.getSource('selected-progress')) map.addSource('selected-progress', { type: 'geojson', data: emptyLines, lineMetrics: true });
+  if (!map.getSource('selected-progress')) map.addSource('selected-progress', { type: 'geojson', data: emptyLines });
   if (!map.getSource('selected-stops')) map.addSource('selected-stops', { type: 'geojson', data: emptyPoints });
   if (!map.getLayer('route-casing')) map.addLayer({ id: 'route-casing', type: 'line', source: 'shapes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': colors.casing, 'line-width': 7 } });
   if (!map.getLayer('route-line')) map.addLayer({ id: 'route-line', type: 'line', source: 'shapes', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': routeStyle(geometry.route_id).color, 'line-width': 4 } });
@@ -41,35 +41,72 @@ function installGeometry(map: Map, geometry: RouteGeometry) {
   });
   if (!map.getLayer('selected-route-casing')) map.addLayer({ id: 'selected-route-casing', type: 'line', source: 'selected-route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': colors.station, 'line-width': 10 } });
   if (!map.getLayer('selected-route-line')) map.addLayer({ id: 'selected-route-line', type: 'line', source: 'selected-route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['case', ['==', ['get', 'phase'], 'visited'], colors.visited, ['get', 'color']], 'line-width': 6 } });
-  if (!map.getLayer('selected-progress')) map.addLayer({ id: 'selected-progress', type: 'line', source: 'selected-progress', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-width': 6, 'line-blur': 0.6, 'line-gradient': emptyGradient } });
+  if (!map.getLayer('selected-next-halo')) map.addLayer({ id: 'selected-next-halo', type: 'line', source: 'selected-progress', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': colors.station, 'line-width': 16 } });
+  if (!map.getLayer('selected-progress')) map.addLayer({ id: 'selected-progress', type: 'line', source: 'selected-progress', layout: { visibility: 'none', 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-width': 10, 'line-blur': 0.6, 'line-color': ['get', 'color'], 'line-opacity': 0 } });
   if (!map.getLayer('selected-stations')) map.addLayer({ id: 'selected-stations', type: 'circle', source: 'selected-stops', paint: {
-    'circle-radius': ['case', ['boolean', ['get', 'next'], false], 8, 6],
-    'circle-color': ['case', ['==', ['get', 'phase'], 'visited'], colors.visited, colors.station],
-    'circle-stroke-color': ['case', ['==', ['get', 'phase'], 'visited'], colors.casing, ['get', 'color']],
-    'circle-stroke-width': ['case', ['boolean', ['get', 'next'], false], 3, 2],
+    'circle-radius': ['case', ['boolean', ['get', 'next'], false], 8, 5],
+    // Next-stop emphasis only: remove the leading next-stop cases to restore the former colors.
+    'circle-color': ['case', ['boolean', ['get', 'next'], false], ['get', 'color'], ['==', ['get', 'phase'], 'visited'], colors.visited, colors.station],
+    'circle-stroke-color': ['case', ['boolean', ['get', 'next'], false], colors.station, ['==', ['get', 'phase'], 'visited'], colors.casing, ['get', 'color']],
+    'circle-stroke-width': ['case', ['boolean', ['get', 'next'], false], 4, 2],
+    'circle-opacity': ['case', ['boolean', ['get', 'next'], false], 1, 0.45],
+    'circle-stroke-opacity': ['case', ['boolean', ['get', 'next'], false], 1, 0.55],
   } });
 }
 
-export function RouteMap({ geometry, positions, selected, onSelect }: { geometry: RouteGeometry; positions: Positions | null; selected: string | null; onSelect: (identity: string | null) => void }) {
+type RouteMapProps = {
+  geometry: RouteGeometry;
+  positions: Positions | null;
+  pinned: string[];
+  active: string | null;
+  pendingReplacement: string | null;
+  desktop: boolean;
+  onToggle: (identity: string, trigger?: HTMLElement) => void;
+  onActivate: (identity: string) => void;
+  onRemove: (identity: string) => void;
+  onClear: () => void;
+};
+
+export function RouteMap({ geometry, positions, pinned, active, pendingReplacement, desktop, onToggle, onActivate, onRemove, onClear }: RouteMapProps) {
   const container = useRef<HTMLDivElement>(null);
   const detailsPanel = useRef<HTMLElement>(null);
+  const previewPanel = useRef<HTMLDivElement>(null);
+  const dockPanel = useRef<HTMLDivElement>(null);
   const stage = useRef<HTMLDivElement>(null);
+  const optionsTrigger = useRef<HTMLButtonElement>(null);
+  const firstOption = useRef<HTMLInputElement>(null);
   const mapRef = useRef<Map | null>(null);
   const interaction = useRef<ReturnType<typeof createTrainInteraction> | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'unavailable'>('loading');
   const [basemapWarning, setBasemapWarning] = useState(false);
   const [markers, setMarkers] = useState<ProjectedTrain[]>([]);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [showDirections, setShowDirections] = useState(true);
+  const [labelMode, setLabelMode] = useState<'terminal' | 'next'>('terminal');
+  const closeOptions = () => { setOptionsOpen(false); optionsTrigger.current?.focus(); };
+  useEffect(() => {
+    if (!optionsOpen) return;
+    firstOption.current?.focus();
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); closeOptions(); }
+    };
+    document.addEventListener('keydown', onEscape, true);
+    return () => document.removeEventListener('keydown', onEscape, true);
+  }, [optionsOpen]);
   const bounds = geometryBounds(geometry);
   const hasUsableShapes = geometry.shapes.some(shape => shape.properties.usable && shape.geometry !== null);
-  const latest = useRef({ geometry, positions, selected, onSelect });
+  const latest = useRef<TrainInteractionView>({ geometry, positions, pinned, active, pendingReplacement, desktop,
+    onToggle, onActivate, onRemove, onClear, labelMode });
   const update = useRef<() => void>(() => {});
   const updateMarkers = useRef<() => void>(() => {});
   useLayoutEffect(() => {
     const dataChanged = latest.current.geometry !== geometry || latest.current.positions !== positions;
-    latest.current = { geometry, positions, selected, onSelect };
+    latest.current = { geometry, positions, pinned, active, pendingReplacement, desktop,
+      onToggle, onActivate, onRemove, onClear, labelMode };
+    if (!interaction.current && dockPanel.current) renderTrainDock(dockPanel.current, latest.current);
     if (dataChanged) update.current(); else interaction.current?.refresh();
     updateMarkers.current();
-  }, [geometry, positions, selected, onSelect]);
+  }, [geometry, positions, pinned, active, pendingReplacement, desktop, onToggle, onActivate, onRemove, onClear, labelMode]);
 
   useEffect(() => {
     let map: Map | undefined;
@@ -87,9 +124,17 @@ export function RouteMap({ geometry, positions, selected, onSelect }: { geometry
         .map(train => {
           const point = map!.project([train.longitude, train.latitude]);
           const journey = journeyView(accepted.geometry, train);
+          const pattern = accepted.geometry.patterns.find(item => item.service_pattern_id === train.service_pattern_id && item.shape_id === train.shape_id);
+          const past = pattern && journey.lines.features.find(feature => feature.properties?.phase === 'visited')?.geometry.coordinates;
+          const trail = past ? directionTrail(past as [number, number][], point, coordinate => map!.project(coordinate)) : [];
+          const directionLabel = accepted.labelMode === 'terminal'
+            ? journey.destination ? `Toward ${journey.destination}` : journey.nextStation ? `Next: ${journey.nextStation}` : null
+            : journey.nextStation ? `Next: ${journey.nextStation}` : journey.destination ? `Toward ${journey.destination}` : null;
+          const extraLabel = directionLabel && directionLabel !== `Toward ${journey.destination}` ? `, ${directionLabel}` : '';
           const status = train.position_basis === 'realtime_prediction' ? 'realtime estimate, not GPS' : 'schedule simulation, not realtime';
           return { train, identity: trainIdentity(train), x: point.x, y: point.y,
-            accessibilityText: `${train.route_id}, ${directionText(train.direction, journey.destination)}, ${status}, ${train.next_arrival_at ?? 'arrival unavailable'}` };
+            trail, directionLabel,
+            accessibilityText: `${train.route_id}, ${directionText(train.direction, journey.destination)}${extraLabel}, ${status}, ${train.next_arrival_at ?? 'arrival unavailable'}` };
         }));
     };
     updateMarkers.current = layoutMarkers;
@@ -147,20 +192,15 @@ export function RouteMap({ geometry, positions, selected, onSelect }: { geometry
     };
     try {
       map = new Map({ container: container.current!, style: styleURL, center: [-73.94, 40.72], zoom: 10, bearing: 0, pitch: 0, minPitch: 0, maxPitch: 0,
-        dragRotate: false, touchZoomRotate: true, touchPitch: false, pitchWithRotate: false, rollEnabled: false, cooperativeGestures: true, attributionControl: false });
+        dragRotate: false, touchZoomRotate: true, touchPitch: false, pitchWithRotate: false, rollEnabled: false,
+        trackResize: false, cooperativeGestures: true, attributionControl: false });
       mapRef.current = map; map.touchZoomRotate.disableRotation(); map.keyboard.disableRotation();
       map.getCanvas().draggable = false;
-      interaction.current = createTrainInteraction(map, detailsPanel.current!, () => latest.current, identity => {
-        const marker = [...(stage.current?.querySelectorAll<HTMLElement>('.train-marker') ?? [])]
-          .find(element => element.dataset.identity === identity)?.querySelector<HTMLElement>('.train-marker-badge');
-        if (!marker || !container.current) return null;
-        const markerBounds = marker.getBoundingClientRect(), mapBounds = container.current.getBoundingClientRect();
-        return { x: markerBounds.left + markerBounds.width / 2 - mapBounds.left, y: markerBounds.top + markerBounds.height / 2 - mapBounds.top };
-      });
+      interaction.current = createTrainInteraction(map, previewPanel.current!, dockPanel.current!, () => latest.current);
       map.getCanvas().setAttribute('aria-label', 'A-line map. Route badges show trains. Overlapping trains share the same map position; every train outcome is in the train list. Use arrow keys to pan and plus or minus to zoom.');
       map.on('style.load', onStyle); map.on('idle', onIdle); map.on('error', onError); map.on('webglcontextlost', unavailable);
       map.on('move', layoutMarkers);
-      observer = new ResizeObserver(() => { if (!disposed) { map?.resize(); layoutMarkers(); } }); observer.observe(container.current!);
+      observer = new ResizeObserver(() => { if (!disposed) { map?.resize({ trainInspection: true }); layoutMarkers(); } }); observer.observe(container.current!);
       deadline = setTimeout(useFallback, 10_000);
     } catch { unavailable(); }
     return () => {
@@ -179,13 +219,33 @@ export function RouteMap({ geometry, positions, selected, onSelect }: { geometry
       <button type="button" aria-label="Zoom in" disabled={status !== 'ready'} onClick={() => mapRef.current?.zoomIn({ duration: 0 })}>+</button>
       <button type="button" aria-label="Zoom out" disabled={status !== 'ready'} onClick={() => mapRef.current?.zoomOut({ duration: 0 })}>−</button>
       <button type="button" disabled={status !== 'ready' || !bounds} onClick={() => { if (bounds) mapRef.current?.fitBounds(bounds, fitOptions); }}>Fit A line</button>
+      <button type="button" className="map-options-trigger" ref={optionsTrigger} aria-controls="map-options" aria-expanded={optionsOpen}
+        onClick={() => optionsOpen ? closeOptions() : setOptionsOpen(true)}>Map options</button>
     </div>
-    <div className="map-stage" ref={stage}>
-      <div className="route-map" ref={container} hidden={status === 'unavailable'} />
-      <TrainMarkers markers={status === 'ready' ? markers : []} selected={selected} map={mapRef.current} interaction={interaction} />
+    <div className={`map-workspace${optionsOpen ? ' map-workspace-open' : ''}`}>
+      <div className="map-stage" ref={stage}>
+        <div className="route-map" ref={container} hidden={status === 'unavailable'} />
+        <TrainMarkers markers={status === 'ready' ? markers : []} pinned={pinned} active={active} map={mapRef.current} interaction={interaction} showDirections={showDirections} />
+      </div>
+      <aside id="map-options" className="map-options" aria-label="Map options" hidden={!optionsOpen}>
+        <div className="map-options-heading"><h3>Map options</h3><button type="button" onClick={closeOptions}>Close</button></div>
+        <label className="map-option"><input ref={firstOption} type="checkbox" checked={showDirections}
+          onChange={event => setShowDirections(event.target.checked)} /> Show train directions</label>
+        <fieldset><legend>Direction label</legend>
+          <label className="map-option"><input type="radio" name="direction-label" value="terminal" checked={labelMode === 'terminal'}
+            onChange={() => setLabelMode('terminal')} /> Terminal</label>
+          <label className="map-option"><input type="radio" name="direction-label" value="next" checked={labelMode === 'next'}
+            onChange={() => setLabelMode('next')} /> Next station</label>
+        </fieldset>
+      </aside>
     </div>
-    <section className="marker-details-panel" aria-label="Map train details" ref={detailsPanel} hidden />
-    <p className="map-hint">Hover a train badge to preview its trip; click or tap to pin. Overlapping trains share the same map position.</p>
+    <section className="marker-details-panel" aria-label={desktop ? 'Pinned train comparison' : 'Map train details'} ref={detailsPanel} hidden>
+      <div className="marker-preview-panel" ref={previewPanel} hidden />
+      <div className="train-dock" ref={dockPanel} hidden />
+    </section>
+    <p className="map-hint">{desktop
+      ? 'Hover a train badge to preview its trip; click to pin up to two trains below the map. Other trains on that line hide while you hover but remain in the train list.'
+      : 'Hover a train badge to preview its trip; tap to select it. Other trains on that line hide while you hover but remain in the train list.'} Overlapping trains share the same map position.</p>
     <p className="map-status" role="status">
       {status === 'unavailable' ? 'Map unavailable. Your browser could not render the map. Stations and trains remain available in the lists.'
         : status === 'loading' ? 'Loading map…' : 'A-line map ready. Lines show route shapes; circles show located stations.'}

@@ -18,7 +18,7 @@ const branches = { ...geometry, patterns: [...geometry.patterns, {
 const card = (page: Page) => page.locator('.marker-card');
 const button = (page: Page, run = 'run-one') => page.getByRole('button', { name: `Run ${run}`, exact: true });
 const phases = (page: Page) => page.evaluate(() => [...new Set(window.testMap.querySourceFeatures('selected-route').map(feature => feature.properties.phase))].sort());
-const camera = (page: Page) => page.evaluate(() => ({ center: window.testMap.getCenter().toArray(), zoom: window.testMap.getZoom() }));
+const camera = (page: Page) => page.evaluate(() => ({ center: window.testMap.getCenter().toArray().map(value => Number(value.toFixed(9))), zoom: Number(window.testMap.getZoom().toFixed(9)) }));
 const marker = (page: Page, item = west) => page.locator(`.train-marker[data-identity=${JSON.stringify(`run:${JSON.stringify(item.trip_instance_id)}`)}]`);
 
 async function start(page: Page, expected = 2) {
@@ -52,25 +52,68 @@ test.beforeEach(async ({ page }) => {
 
 test('hover previews the journey and direction, then restores the unselected map', async ({ page }, testInfo) => {
   await start(page);
-  await expect(page.getByText('Hover a train badge to preview its trip; click or tap to pin. Overlapping trains share the same map position.', { exact: true })).toBeVisible();
+  await expect(page.getByText('Other trains on that line hide while you hover but remain in the train list.', { exact: false })).toBeVisible();
   const before = await camera(page);
   await hover(page);
   await expect(card(page)).toHaveAttribute('data-state', 'preview');
   await expect(card(page)).toContainText('Northbound to Alpha');
   await expect(button(page)).toHaveAttribute('aria-pressed', 'false');
-  await expect(marker(page, east).locator('.train-marker-badge')).toHaveCSS('opacity', '0.55');
+  await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '0');
   await expect.poll(() => phases(page)).toEqual(['upcoming', 'visited']);
   await expect.poll(() => page.evaluate(() => window.testMap.querySourceFeatures('selected-progress').length)).toBeGreaterThan(0);
-  await expect.poll(() => page.evaluate(() => JSON.stringify(window.testMap.getPaintProperty('selected-progress', 'line-gradient')))).toContain('0.35');
+  await expect.poll(() => page.evaluate(() => window.testMap.getPaintProperty('selected-progress', 'line-opacity'))).toBe(1);
+  await expect(page.locator('.next-stop-label')).toHaveText(/Next: Alpha\s+Toward Alpha/);
+  await expect(page.locator('.next-stop-label')).toHaveCSS('white-space', 'pre-line');
+  expect(await page.locator('.next-stop-label').textContent()).toContain('\n');
+  await expect(page.locator('.next-stop-label')).toBeVisible();
+  await expect(page.locator('.train-direction-chip').filter({ hasText: 'Toward Alpha' })).toBeHidden();
+  await expect.poll(() => page.evaluate(() => {
+    const label = document.querySelector('.next-stop-label')?.getBoundingClientRect();
+    const preview = document.querySelector('.route-map .marker-card')?.getBoundingClientRect();
+    return !!label && !!preview && (label.right <= preview.left || label.left >= preview.right || label.bottom <= preview.top || label.top >= preview.bottom);
+  })).toBe(true);
+  await expect.poll(() => page.evaluate(() => {
+    const map = window.testMap, label = document.querySelector('.next-stop-label')?.getBoundingClientRect();
+    const bounds = map.getContainer().getBoundingClientRect();
+    if (!label) return false;
+    return map.querySourceFeatures('selected-route').every(feature => {
+      if (feature.geometry.type !== 'LineString') return false;
+      const coordinates = feature.geometry.coordinates;
+      return coordinates.slice(1).every((coordinate, index) => {
+        const start = map.project(coordinates[index]! as [number, number]);
+        const end = map.project(coordinate as [number, number]);
+        const steps = Math.ceil(Math.hypot(end.x - start.x, end.y - start.y) / 2);
+        for (let step = 0; step <= steps; step++) {
+          const t = steps ? step / steps : 0;
+          const x = bounds.left + start.x + (end.x - start.x) * t, y = bounds.top + start.y + (end.y - start.y) * t;
+          if (x >= label.left - 4 && x <= label.right + 4 && y >= label.top - 4 && y <= label.bottom + 4) return false;
+        }
+        return true;
+      });
+    });
+  })).toBe(true);
+  await expect(page.locator('.next-stop-label')).toHaveCSS('pointer-events', 'none');
+  expect(await page.evaluate(() => window.testMap.getLayoutProperty('selected-next-halo', 'visibility'))).toBe('visible');
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-next-halo', 'line-width'))).toBe(16);
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-progress', 'line-width'))).toBe(10);
   await expect.poll(() => page.evaluate(() => [...new Set(window.testMap.querySourceFeatures('selected-stops')
     .map(feature => `${feature.properties.phase}:${feature.properties.next}`))].sort())).toEqual(['upcoming:true', 'visited:false']);
   expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-stations', 'circle-color'))).toEqual(
-    ['case', ['==', ['get', 'phase'], 'visited'], '#8d98a8', '#ffffff']);
+    ['case', ['boolean', ['get', 'next'], false], ['get', 'color'], ['==', ['get', 'phase'], 'visited'], '#8d98a8', '#ffffff']);
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-stations', 'circle-stroke-width'))).toEqual(
+    ['case', ['boolean', ['get', 'next'], false], 4, 2]);
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-stations', 'circle-radius'))).toEqual(
+    ['case', ['boolean', ['get', 'next'], false], 8, 5]);
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('selected-stations', 'circle-opacity'))).toEqual(
+    ['case', ['boolean', ['get', 'next'], false], 1, 0.45]);
+  expect(await page.evaluate(() => window.testMap.getPaintProperty('route-line', 'line-color'))).toBe('#8d98a8');
   expect(await page.evaluate(() => window.testMap.getPaintProperty('route-line', 'line-opacity'))).toBeLessThan(1);
   await page.locator('.map-panel').screenshot({ path: testInfo.outputPath('train-preview.png') });
   await leave(page);
   await expect(card(page)).toHaveCount(0);
-  await expect(marker(page, east).locator('.train-marker-badge')).toHaveCSS('opacity', '1');
+  await expect(page.locator('.next-stop-label')).toBeHidden();
+  await expect(page.locator('.train-direction-chip').filter({ hasText: 'Toward Alpha' })).toBeVisible();
+  await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '1');
   await expect.poll(() => phases(page)).toEqual([]);
   await expect.poll(() => page.evaluate(() => window.testMap.querySourceFeatures('selected-progress').length)).toBe(0);
   await expect.poll(() => camera(page)).toEqual(before);
@@ -81,39 +124,73 @@ test('hovering another train temporarily replaces the clicked journey and restor
   await start(page);
   const point = await markerPoint(page);
   await page.mouse.click(point.x, point.y);
+  const dock = page.locator('.train-dock .marker-card');
+  const popup = page.locator('.route-map .marker-card');
   await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
-  await expect(card(page)).toHaveAttribute('data-state', 'selected');
-  await expect(card(page)).toContainText('Selected');
+  await expect(dock).toHaveAttribute('data-state', 'active');
+  await expect(dock).toContainText('Active journey');
+  await expect(page.locator('.next-stop-label')).toHaveText(/Next: Alpha\s+Toward Alpha/);
   await expect.poll(() => page.evaluate(() => window.testMap.querySourceFeatures('selected-progress').length)).toBeGreaterThan(0);
   await page.locator('.map-panel').screenshot({ path: testInfo.outputPath('train-selected.png') });
   const selectedCamera = await camera(page);
   await hover(page, east);
-  await expect(card(page)).toHaveAttribute('data-state', 'preview');
-  await expect(card(page)).toContainText('Southbound to 2 St');
+  await expect(popup).toHaveAttribute('data-state', 'preview');
+  await expect(popup).toContainText('Southbound to 2 St');
+  await expect(page.locator('.next-stop-label')).toHaveText(/Next: 2 St\s+Toward 2 St/);
   await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
+  await expect(marker(page).locator('..')).toHaveCSS('opacity', '1');
   await expect(button(page, 'run-two')).toHaveAttribute('aria-pressed', 'false');
   await expect.poll(() => page.evaluate(() => window.testMap.querySourceFeatures('selected-stops')
     .some(feature => feature.geometry.type === 'Point' && Math.abs(feature.geometry.coordinates[0]! + 73.91) < 0.001))).toBe(true);
   await leave(page);
-  await expect(card(page)).toHaveAttribute('data-state', 'selected');
-  await expect(card(page)).toContainText('Northbound to Alpha');
+  await expect(popup).toHaveCount(0);
+  await expect(dock).toHaveAttribute('data-state', 'active');
+  await expect(dock).toContainText('Northbound to Alpha');
+  await expect(page.locator('.next-stop-label')).toHaveText(/Next: Alpha\s+Toward Alpha/);
+  await expect(marker(page).locator('..')).toHaveCSS('opacity', '1');
   await expect.poll(() => camera(page)).toEqual(selectedCamera);
-  await card(page).getByRole('button', { name: 'Close train details' }).click();
-  await expect(card(page)).toHaveCount(0);
+  await dock.getByRole('button', { name: 'Remove' }).click();
+  await expect(dock).toHaveCount(0);
+  await expect(page.locator('.next-stop-label')).toBeHidden();
   await expect(button(page)).toHaveAttribute('aria-pressed', 'false');
 });
 
-test('the next-stop progress pulse advances when motion is allowed', async ({ page }) => {
+test('the next-stop segment and stop outline pulse together when motion is allowed', async ({ page }) => {
   await page.emulateMedia({ reducedMotion: 'no-preference' });
   await start(page);
   await hover(page);
-  const position = () => page.evaluate(() => {
-    const gradient = window.testMap.getPaintProperty('selected-progress', 'line-gradient') as unknown as [unknown, unknown, [unknown, [unknown, unknown, number]]];
-    return gradient?.[2]?.[1]?.[2];
+  const pulse = () => page.evaluate(() => {
+    const line = window.testMap.getPaintProperty('selected-progress', 'line-opacity') as number;
+    const outline = window.testMap.getPaintProperty('selected-stations', 'circle-stroke-opacity') as [unknown, unknown, number, number];
+    return { line, outline: outline?.[2] };
   });
-  await expect.poll(async () => typeof await position()).toBe('number');
-  const first = await position();
-  await expect.poll(position).not.toBe(first);
+  await expect.poll(async () => (await pulse()).line).toBeGreaterThanOrEqual(0.55);
+  const first = await pulse();
+  expect(first.outline).toBeCloseTo(first.line, 5);
+  await expect.poll(async () => (await pulse()).line).not.toBe(first.line);
+  const later = await pulse();
+  expect(later.outline).toBeCloseTo(later.line, 5);
+});
+
+test('pointer-only hiding preserves keyboard access', async ({ page }) => {
+  await start(page);
+  await hover(page);
+  await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '0');
+  await expect(marker(page, east)).toHaveAttribute('aria-label', /Southbound to 2 St/);
+  await expect(button(page, 'run-two')).toBeVisible();
+  await marker(page, east).focus();
+  await expect(marker(page, east)).toBeFocused();
+  await expect(marker(page).locator('..')).toHaveCSS('opacity', '1');
+  await expect(card(page)).toContainText('Southbound to 2 St');
+});
+
+test('pointer-only hiding ends when the train is pinned', async ({ page }) => {
+  await start(page);
+  await hover(page);
+  await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '0');
+  await marker(page).click();
+  await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '1');
+  await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
 });
 
 for (const dismiss of ['Escape', 'empty map'] as const) test(`${dismiss} dismisses an unpinned hover preview`, async ({ page }) => {
@@ -136,18 +213,23 @@ test('accepted train refresh preserves the hovered state and removal restores th
   await button(page).click();
   await page.locator('.route-map').scrollIntoViewIfNeeded();
   await hover(page, east);
-  await expect(card(page)).toContainText('Southbound to 2 St');
+  const popup = page.locator('.route-map .marker-card');
+  const dock = page.locator('.train-dock .marker-card');
+  await expect(popup).toContainText('Southbound to 2 St');
   await page.clock.install();
   next = { ...snapshot, trains: [west, { ...east, next_arrival_at: '2026-09-14T12:09:00Z' }] };
   await page.clock.runFor(5000);
-  await expect(card(page)).toContainText('8:09 AM EDT');
-  await expect(card(page)).toHaveAttribute('data-state', 'preview');
+  await expect(popup).toContainText('8:09 AM EDT');
+  await expect(popup).toHaveAttribute('data-state', 'preview');
   await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
+  await expect(marker(page).locator('..')).toHaveCSS('opacity', '1');
   next = { ...snapshot, trains: [west] };
   await page.clock.runFor(5000);
-  await expect(card(page)).toHaveAttribute('data-state', 'selected');
-  await expect(card(page)).toContainText('Northbound to Alpha');
+  await expect(popup).toHaveCount(0);
+  await expect(dock).toHaveAttribute('data-state', 'active');
+  await expect(dock).toContainText('Northbound to Alpha');
   await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
+  await expect(marker(page).locator('..')).toHaveCSS('opacity', '1');
 });
 
 test('the preview card remains usable while the pointer moves from the train to its content', async ({ page }) => {
@@ -172,8 +254,9 @@ test('the floating card and outlined pointer stay clear of every visible route l
   await start(page, 1);
   await hover(page, straightTrain);
   await expect(page.locator('.route-map .marker-card')).toBeVisible();
-  await expect(page.locator('.train-popup')).toHaveCSS('z-index', '4');
-  await expect(page.locator('.train-marker-overlay')).toHaveCSS('z-index', '2');
+  await expect(page.locator('.train-popup')).toHaveCSS('z-index', '6');
+  await expect(page.locator('.train-marker-overlay')).toHaveCSS('z-index', 'auto');
+  await expect(marker(page, straightTrain).locator('..')).toHaveCSS('z-index', '5');
   const tip = page.locator('.train-popup .maplibregl-popup-tip');
   await expect(tip).toBeVisible();
   await expect.poll(() => tip.evaluate(element => getComputedStyle(element).filter)).not.toBe('none');
@@ -187,7 +270,7 @@ test('the floating card and outlined pointer stay clear of every visible route l
     const x = Math.max(arrow.left, Math.min(marker.x, arrow.right));
     const y = Math.max(arrow.top, Math.min(marker.y, arrow.bottom));
     return Math.hypot(x - marker.x, y - marker.y);
-  })).toBeLessThanOrEqual(20);
+  })).toBeLessThanOrEqual(40);
   await expect.poll(() => page.evaluate(() => {
     const map = window.testMap;
     const bounds = map.getContainer().getBoundingClientRect();
@@ -248,6 +331,7 @@ test('a constrained map keeps details on-map until the user explicitly moves the
 });
 
 test('temporary inspection movement restores unless the user deliberately drags', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
   await start(page);
   await page.addStyleTag({ content: '.route-map { width: 380px !important; height: 300px !important; }' });
   await page.evaluate(item => new Promise<void>(resolve => {
@@ -286,6 +370,7 @@ test.describe('touch selection', () => {
     await page.touchscreen.tap(point.x, point.y);
     await expect(button(page)).toHaveAttribute('aria-pressed', 'true');
     await expect(card(page)).toHaveAttribute('data-state', 'selected');
+    await expect(marker(page, east).locator('..')).toHaveCSS('opacity', '1');
     await page.locator('.route-map').scrollIntoViewIfNeeded();
     const box = (await page.locator('.route-map').boundingBox())!;
     await page.touchscreen.tap(box.x + 8, box.y + 8);

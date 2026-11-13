@@ -52,11 +52,12 @@ test('keyboard and list selection reach an obscured train, and polling refreshes
   await marker(page, 'three').focus();
   await page.keyboard.press('Enter');
   await expect(listButton(page, 'three')).toHaveAttribute('aria-pressed', 'true');
-  await expect(page.locator('.marker-card')).toContainText('Schedule estimate · not realtime');
+  const activeCard = page.locator('.train-dock .marker-card[data-state="active"]');
+  await expect(activeCard).toContainText('Schedule estimate · not realtime');
   current = [...trains].reverse().map(item => item.trip_instance_id === 'three' ? { ...item, next_arrival_at: '2026-09-14T12:10:00Z' } : item);
   await page.clock.runFor(5_000);
   await expect(marker(page, 'three')).toBeFocused();
-  await expect(page.locator('.marker-card')).toContainText('8:10 AM EDT');
+  await expect(activeCard).toContainText('8:10 AM EDT');
 });
 
 for (const width of [1920, 1440, 1024, 768, 390, 320]) test(`responsive overlapping markers at ${width}px`, async ({ page }, testInfo) => {
