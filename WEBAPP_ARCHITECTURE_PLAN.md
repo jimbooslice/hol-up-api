@@ -222,6 +222,14 @@ Create separate MapLibre GeoJSON sources for static geometry:
   Hover/focus uses a dashed ring. Click/tap pins the badge with an amber
   ring at its anchor, without introducing another collision through displacement. A second
   hover temporarily overrides the pinned view and restores it on mouse-out.
+  Pointer hover alone temporarily hides other same-route markers visually;
+  their buttons remain keyboard accessible, and keyboard focus or pinning
+  restores them. Trip inspection highlights the validated shape only from the
+  train to its pattern's terminal stop; other branches remain neutral. The
+  next-stop segment has a contrasting halo and pulses with the stop-circle
+  outline. Show its name beside the circle independently of basemap glyphs;
+  hide the label when the stop is offscreen. Reduced-motion settings retain
+  steady emphasis.
 
 Fit the camera to valid route geometry after the first successful geometry
 load. Add a "Fit A line" button. Polling preserves the user's camera. Inspection
@@ -619,11 +627,32 @@ served by the development test server and is absent from `dist`.
   visually disliked. Markers now overlap; the train list and keyboard navigation
   remain available for every train. Do not restore that pattern unless the user
   explicitly reverses the product decision.
+- [x] **HUP-15 — docked two-train comparison.** Production decision dated
+  2026-09-29: above 700px, keep at most two ordered pins from the currently
+  loaded route in a dock below the map. A reducer owns ordered pins, the
+  persistent active journey, and a pending third-pin replacement. Hover/focus
+  previews are transient. The subsequent tooltip decision replaces the original
+  no-camera-movement rule: jointly measure/place the popup, its pointer, and the
+  two-line next-stop label before reveal. Exhaust fixed positions, then smoothly
+  try desktop zoom increments of 0.1 up to +1 level with minimal translation
+  bounded to one-quarter viewport per axis. Restore on dismissal unless the rider
+  navigates; polling must not accumulate zoom. Hide the duplicate label if no
+  safe pair fits; when the preview itself cannot fit, expand it above the dock.
+  Phone camera controls remain unchanged. Next-stop colors are an independently
+  reversible styling change. Native modal replacement preserves
+  the chosen slot and restores trigger focus. Accepted polling snapshots refresh
+  card evidence without reordering, remove missing trains, and promote the newest
+  remaining pin; retained failures preserve pins. Incompatible schedule geometry
+  suppresses only markers and journey overlays. Phone layouts retain one selected
+  train and responsive collapse keeps the active pin with a live announcement.
+  Three-pin dock overflow/ordering, phone multi-pin controls, and simultaneous
+  multi-route comparison are deferred until explicitly requested.
 - [ ] **HUP-16 — Zoom-responsive map decluttering.** Measure desktop/mobile
   zoom values, then set shared thresholds for scaled train/station/route
   rendering and for hiding train controls at low zoom. Include the low-zoom
   marker density and viewport-edge clipping. It must preserve the 2026-09-22
-  decision against count/counter badges and their associated chooser UI.
+  decision against count/counter badges and their associated chooser UI. Hide
+  HUP-13 direction dots and labels whenever train markers are hidden.
 
 The page remains fluid with responsive gutters, a flexible map and 360px
 sidebar at 1024px and above, and stacked content below. Map height is
